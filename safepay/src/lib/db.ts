@@ -2,7 +2,9 @@ import { Pool } from "pg";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: process.env.DATABASE_URL?.includes('localhost') 
+    ? false  // no SSL for local database
+    : { rejectUnauthorized: false }, // SSL for remote/production database
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,

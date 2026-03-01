@@ -2,75 +2,99 @@
 pragma solidity ^0.8.19;
 
 contract SafePayEscrow {
-    address public admin;
+    address public owner;
 
-    enum State { AWAITING_DELIVERY, COMPLETE, REFUNDED }
+    enum EscrowStatus { PENDING, FUNDED, RELEASED, REFUNDED }
 
     struct Escrow {
-        address payable buyer;
-        address payable seller;
+        address buyer;
+        address seller;
         uint256 amount;
-        State state;
+        EscrowStatus status;
+        string orderId;        // links to your DB order UUID
     }
 
-    mapping(string => Escrow) public escrows;
+    mapping(string => Escrow) public escrows;  // orderId => Escrow
+    mapping(string => bool)   public exists;
 
     event EscrowCreated(string orderId, address buyer, address seller, uint256 amount);
     event PaymentReleased(string orderId, address seller, uint256 amount);
-    event BuyerRefunded(string orderId, address buyer, uint256 amount);
+    event PaymentRefunded(string orderId, address buyer, uint256 amount);
 
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Only admin");
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier escrowExists(string memory orderId) {
+        require(exists[orderId], "Escrow does not exist");
         _;
     }
 
     constructor() {
-        admin = msg.sender;
+        owner = msg.sender;
     }
 
-    function createEscrow(string memory orderId, address payable seller) external payable {
+    // Buyer calls this with ETH value to lock funds
+    function createEscrow(
+        string memory orderId,
+        address seller
+    ) external payable {
+        require(!exists[orderId], "Escrow already exists");
         require(msg.value > 0, "Must send ETH");
-        require(escrows[orderId].amount == 0, "Escrow exists");
+        require(seller != address(0), "Invalid seller");
 
         escrows[orderId] = Escrow({
-            buyer: payable(msg.sender),
-            seller: seller,
-            amount: msg.value,
-            state: State.AWAITING_DELIVERY
+            buyer:   msg.sender,
+            seller:  seller,
+            amount:  msg.value,
+            status:  EscrowStatus.FUNDED,
+            orderId: orderId
         });
+        exists[orderId] = true;
 
         emit EscrowCreated(orderId, msg.sender, seller, msg.value);
     }
 
-    function releasePayment(string memory orderId) external {
+    // Only owner (backend) can release after OTP confirmed
+    function releasePayment(string memory orderId)
+        external
+        onlyOwner
+        escrowExists(orderId)
+    {
         Escrow storage e = escrows[orderId];
-        require(msg.sender == e.buyer || msg.sender == admin, "Not authorized");
-        require(e.state == State.AWAITING_DELIVERY, "Invalid state");
+        require(e.status == EscrowStatus.FUNDED, "Not in funded state");
 
-        e.state = State.COMPLETE;
-        uint256 amount = e.amount;
-        e.amount = 0;
-        e.seller.transfer(amount);
+        e.status = EscrowStatus.RELEASED;
+        payable(e.seller).transfer(e.amount);
 
-        emit PaymentReleased(orderId, e.seller, amount);
+        emit PaymentReleased(orderId, e.seller, e.amount);
     }
 
-    function refundBuyer(string memory orderId) external onlyAdmin {
+    // Only owner (admin) can refund buyer
+    function refundBuyer(string memory orderId)
+        external
+        onlyOwner
+        escrowExists(orderId)
+    {
         Escrow storage e = escrows[orderId];
-        require(e.state == State.AWAITING_DELIVERY, "Invalid state");
+        require(e.status == EscrowStatus.FUNDED, "Not in funded state");
 
-        e.state = State.REFUNDED;
-        uint256 amount = e.amount;
-        e.amount = 0;
-        e.buyer.transfer(amount);
+        e.status = EscrowStatus.REFUNDED;
+        payable(e.buyer).transfer(e.amount);
 
-        emit BuyerRefunded(orderId, e.buyer, amount);
+        emit PaymentRefunded(orderId, e.buyer, e.amount);
     }
 
-    function getEscrow(string memory orderId) external view returns (
-        address, address, uint256, State
-    ) {
-        Escrow memory e = escrows[orderId];
-        return (e.buyer, e.seller, e.amount, e.state);
+    function getEscrow(string memory orderId)
+        external
+        view
+        returns (Escrow memory)
+    {
+        return escrows[orderId];
+    }
+
+    function getBalance() external view returns (uint256) {
+        return address(this).balance;
     }
 }

@@ -1,64 +1,62 @@
 "use client";
 import Image from "next/image";
-import Navbar from "@/components/ui/Navbar";
-import { useSession } from "next-auth/react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { signOut, useSession } from "next-auth/react";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toaster } from "@/components/ui/toaster";
 import { Order, Product } from "@/types";
 
-import {
-  Box, Grid, GridItem, Heading, Text, VStack, Button,
-  HStack, Input, Field, Stat, Badge, Textarea, Separator,
-} from '@chakra-ui/react';
-
 const CATEGORIES = ['All', 'Shoes', 'Bags', 'Electronics', 'Fashion', 'Accessories', 'Beauty'];
 
-const STATUS_COLOR: Record<string, string> = {
-  pending:   'yellow',
-  paid:      'blue',
-  in_escrow: 'purple',
-  delivered: 'cyan',
-  completed: 'green',
-  disputed:  'red',
-  refunded:  'orange',
+const STATUS_STYLE: Record<string, { bg: string; text: string; dot: string }> = {
+  pending:   { bg: 'rgba(245,158,11,0.1)',  text: '#F59E0B', dot: '#F59E0B' },
+  paid:      { bg: 'rgba(59,130,246,0.1)',   text: '#3B82F6', dot: '#3B82F6' },
+  in_escrow: { bg: 'rgba(139,92,246,0.1)',   text: '#8B5CF6', dot: '#8B5CF6' },
+  delivered: { bg: 'rgba(6,182,212,0.1)',    text: '#06B6D4', dot: '#06B6D4' },
+  completed: { bg: 'rgba(16,185,129,0.1)',   text: '#10B981', dot: '#10B981' },
+  disputed:  { bg: 'rgba(239,68,68,0.1)',    text: '#EF4444', dot: '#EF4444' },
+  refunded:  { bg: 'rgba(249,115,22,0.1)',   text: '#F97316', dot: '#F97316' },
 };
+
+type CartItem = Product & { qty: number };
+type OrderWithSeller = Order & { seller_name?: string; tx_hash?: string };
 
 export default function BuyerDashboard() {
   const { data: session } = useSession();
-  const router       = useRouter();
   const searchParams = useSearchParams();
 
   const [tab, setTab] = useState<'shop' | 'orders'>(
     searchParams.get('tab') === 'orders' ? 'orders' : 'shop'
   );
 
-  // shop
   const [products, setProducts]   = useState<Product[]>([]);
   const [category, setCategory]   = useState('All');
   const [search, setSearch]       = useState('');
   const [fetching, setFetching]   = useState(true);
+  const [orders, setOrders]       = useState<OrderWithSeller[]>([]);
 
-  // orders
-  const [orders, setOrders] = useState<Order[]>([]);
+  // ── cart ─────────────────────────────────────────────
+  const [cart, setCart]           = useState<CartItem[]>([]);
+  const [cartOpen, setCartOpen]   = useState(false);
+  const [payMethod, setPayMethod] = useState('mobile_money');
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [checkoutDone, setCheckoutDone] = useState(false);
+  const [lastReceipts, setLastReceipts] = useState<Array<{
+    item_name: string; amount: number; gateway_ref: string; tx_hash: string; method: string;
+  }>>([]);
 
-  // buy dialog
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [payMethod, setPayMethod]   = useState('mobile_money');
-  const [buyLoading, setBuyLoading] = useState(false);
-
-  // otp dialog
-  const [otpOrder, setOtpOrder]         = useState<Order | null>(null);
+  // ── otp ──────────────────────────────────────────────
+  const [otpOrder, setOtpOrder]         = useState<OrderWithSeller | null>(null);
   const [generatedOtp, setGeneratedOtp] = useState<string | null>(null);
   const [otpInput, setOtpInput]         = useState('');
   const [otpLoading, setOtpLoading]     = useState(false);
 
-  // dispute dialog
-  const [disputeOrder, setDisputeOrder]     = useState<Order | null>(null);
-  const [disputeReason, setDisputeReason]   = useState('');
+  // ── dispute ──────────────────────────────────────────
+  const [disputeOrder, setDisputeOrder]   = useState<OrderWithSeller | null>(null);
+  const [disputeReason, setDisputeReason] = useState('');
   const [disputeLoading, setDisputeLoading] = useState(false);
 
-  // ── Fetch ──────────────────────────────────────────────
+  // ── fetchers ─────────────────────────────────────────
   async function fetchProducts(cat = 'All') {
     setFetching(true);
     const url  = cat === 'All' ? '/api/products' : `/api/products?category=${encodeURIComponent(cat)}`;
@@ -75,58 +73,89 @@ export default function BuyerDashboard() {
   }
 
   useEffect(() => { fetchProducts(); fetchOrders(); }, []);
+  useEffect(() => {
+    const interval = setInterval(fetchOrders, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // ── Buy ────────────────────────────────────────────────
-  async function handleBuy() {
-    if (!selectedProduct) return;
-    setBuyLoading(true);
-    const res = await fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        seller_id:      selectedProduct.seller_id,
-        item_name:      selectedProduct.name,
-        amount:         selectedProduct.price,
-        payment_method: payMethod,
-      }),
+  // ── cart helpers ─────────────────────────────────────
+  function addToCart(product: Product) {
+    setCart(prev => {
+      const exists = prev.find(i => i.id === product.id);
+      if (exists) return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+      return [...prev, { ...product, qty: 1 }];
     });
-    setBuyLoading(false);
+    toaster.create({ title: `🛒 ${product.name} added to cart`, type: 'success', duration: 2000 });
+    setCartOpen(true);
+  }
 
-    if (res.ok) {
-      toaster.create({ title: '✅ Order placed! Payment locked in escrow.', type: 'success', duration: 4000 });
-      setSelectedProduct(null);
+  function removeFromCart(id: string) {
+    setCart(prev => prev.filter(i => i.id !== id));
+  }
+
+  function updateQty(id: string, delta: number) {
+    setCart(prev => prev
+      .map(i => i.id === id ? { ...i, qty: Math.max(1, i.qty + delta) } : i)
+    );
+  }
+
+  const cartTotal = cart.reduce((sum, i) => sum + Number(i.price) * i.qty, 0);
+  const cartCount = cart.reduce((sum, i) => sum + i.qty, 0);
+  const inCartIds = new Set(cart.map(i => i.id));
+
+  // ── checkout (all cart items) ────────────────────────
+  async function handleCheckout() {
+    if (cart.length === 0) return;
+    setCheckingOut(true);
+    const receipts: typeof lastReceipts = [];
+    let allOk = true;
+
+    for (const item of cart) {
+      for (let q = 0; q < item.qty; q++) {
+        const res  = await fetch('/api/orders', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            seller_id: item.seller_id, item_name: item.name,
+            amount: item.price, payment_method: payMethod,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment });
+        } else {
+          toaster.create({ title: `❌ ${item.name}: ${data.error || 'failed'}`, type: 'error', duration: 4000 });
+          allOk = false;
+        }
+      }
+    }
+
+    setCheckingOut(false);
+    if (receipts.length > 0) {
+      setLastReceipts(receipts);
+      setCheckoutDone(true);
+      setCart([]);
+      setCartOpen(false);
       await fetchOrders();
-      setTab('orders');
-    } else {
-      toaster.create({ title: 'Failed to place order', type: 'error', duration: 3000 });
+      if (allOk) toaster.create({ title: `✅ ${receipts.length} order${receipts.length > 1 ? 's' : ''} placed!`, type: 'success', duration: 5000 });
     }
   }
 
-  // ── OTP ────────────────────────────────────────────────
+  // ── otp ──────────────────────────────────────────────
   async function handleGenerateOtp() {
     if (!otpOrder) return;
     setOtpLoading(true);
     const res  = await fetch('/api/otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: otpOrder.id, action: 'generate' }),
     });
     const data = await res.json();
     setOtpLoading(false);
-  
     if (res.ok) {
-      setGeneratedOtp(data.otp); // always show on screen
-      if (data.email_sent) {
-        toaster.create({
-          title: `📧 OTP also sent to ${session?.user?.email}`,
-          type: 'info', duration: 4000,
-        });
-      } else {
-        toaster.create({
-          title: '⚠️ Email unavailable — use the code shown on screen',
-          type: 'warning', duration: 6000,
-        });
-      }
+      setGeneratedOtp(data.otp);
+      toaster.create({
+        title: data.email_sent ? `📧 OTP sent to ${session?.user?.email}` : '⚠️ Email failed — use code on screen',
+        type: data.email_sent ? 'info' : 'warning', duration: 4000,
+      });
     } else {
       toaster.create({ title: data.error || 'Failed to generate OTP', type: 'error', duration: 3000 });
     }
@@ -136,531 +165,630 @@ export default function BuyerDashboard() {
     if (!otpOrder || !otpInput) return;
     setOtpLoading(true);
     const res  = await fetch('/api/otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: otpOrder.id, action: 'verify', otp_token: otpInput }),
     });
     const data = await res.json();
     setOtpLoading(false);
     if (res.ok) {
-      toaster.create({ title: '✅ Delivery confirmed! Payment released.', type: 'success', duration: 5000 });
-      setOtpOrder(null);
-      setGeneratedOtp(null);
-      setOtpInput('');
-      fetchOrders();
+      toaster.create({ title: '✅ Delivery confirmed! Payment released to seller.', type: 'success', duration: 5000 });
+      setOtpOrder(null); setGeneratedOtp(null); setOtpInput(''); fetchOrders();
     } else {
       toaster.create({ title: data.error || 'Invalid OTP', type: 'error', duration: 3000 });
     }
   }
 
-  // ── Dispute ────────────────────────────────────────────
+  // ── dispute ──────────────────────────────────────────
   async function handleOpenDispute() {
     if (!disputeOrder || !disputeReason.trim()) return;
     setDisputeLoading(true);
     const res = await fetch('/api/disputes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: disputeOrder.id, reason: disputeReason }),
     });
     setDisputeLoading(false);
     if (res.ok) {
       toaster.create({ title: '⚠️ Dispute opened. Admin will review shortly.', type: 'warning', duration: 5000 });
-      setDisputeOrder(null);
-      setDisputeReason('');
-      fetchOrders();
+      setDisputeOrder(null); setDisputeReason(''); fetchOrders();
     } else {
       toaster.create({ title: 'Failed to open dispute', type: 'error', duration: 3000 });
     }
   }
 
-  // ── Stats ──────────────────────────────────────────────
+  // ── stats ─────────────────────────────────────────────
   const completed = orders.filter(o => o.status === 'completed').length;
   const inEscrow  = orders.filter(o => ['in_escrow','paid','pending'].includes(o.status)).length;
   const disputed  = orders.filter(o => o.status === 'disputed').length;
+  const delivered = orders.filter(o => o.status === 'delivered').length;
 
   const filtered = products.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase()) ||
     p.description?.toLowerCase().includes(search.toLowerCase())
   );
 
-  type OrderWithSeller = Order & { seller_name?: string };
+  const methodLabel: Record<string, string> = {
+    mobile_money:  '📱 MTN Mobile Money',
+    bank_transfer: '🏦 Bank Transfer',
+    crypto:        '⛓️ Crypto (Sepolia ETH)',
+  };
+
+  function goBack() {
+    setOtpOrder(null); setGeneratedOtp(null); setOtpInput('');
+    setDisputeOrder(null); setDisputeReason('');
+    setCheckoutDone(false); setLastReceipts([]);
+  }
 
   return (
-    <Box minH="100vh" bg="gray.50">
-      <Navbar />
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+          --navy:   #04080F; --deep:  #060B17; --panel: #0D1526;
+          --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
+          --accent: #3B82F6; --accent2: #2563EB;
+          --text:   #E8EDF5; --muted: #7B8BAD;
+          --green:  #10B981; --gold: #F59E0B; --red: #EF4444;
+        }
+        body { background: var(--deep); color: var(--text); font-family: 'DM Sans', sans-serif; }
 
-      {/* Tab nav */}
-      <Box bg="white" borderBottom="1px solid" borderColor="gray.200" px={6}>
-        <HStack gap={0}>
-          {[
-            { key: 'shop'   as const, label: '🛍️ Shop' },
-            { key: 'orders' as const, label: `📦 My Orders${orders.length > 0 ? ` (${orders.length})` : ''}` },
-          ].map(t => (
-            <Box key={t.key} px={5} py={3} cursor="pointer"
-              borderBottom="2px solid"
-              borderColor={tab === t.key ? 'blue.600' : 'transparent'}
-              color={tab === t.key ? 'blue.600' : 'gray.600'}
-              fontWeight={tab === t.key ? 700 : 400}
-              fontSize="sm"
-              onClick={() => setTab(t.key)}
-              _hover={{ color: 'blue.600' }}>
-              {t.label}
-            </Box>
-          ))}
-        </HStack>
-      </Box>
+        .dash-wrap { display: flex; min-height: 100vh; }
 
-      <Box maxW="1200px" mx="auto" p={6}>
-        <VStack align="start" gap={6}>
+        /* SIDEBAR */
+        .sidebar {
+          width: 240px; flex-shrink: 0; background: var(--navy);
+          border-right: 1px solid var(--border);
+          display: flex; flex-direction: column;
+          position: sticky; top: 0; height: 100vh;
+        }
+        .sidebar-logo { padding: 28px 24px 20px; font-family: 'Syne', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: -0.5px; border-bottom: 1px solid var(--border); }
+        .sidebar-logo span { color: var(--accent); }
+        .sidebar-user { padding: 16px 20px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
+        .avatar { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #10B981, #059669); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; flex-shrink: 0; }
+        .user-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .user-role { font-size: 11px; color: var(--muted); }
+        .sidebar-nav { flex: 1; padding: 16px 12px; display: flex; flex-direction: column; gap: 4px; }
+        .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 14px; color: var(--muted); transition: all .15s; border: 1px solid transparent; user-select: none; }
+        .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+        .nav-item.active { color: var(--text); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.2); }
+        .nav-badge { background: rgba(59,130,246,0.2); color: var(--accent); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 100px; }
+        .nav-badge-green { background: rgba(16,185,129,0.2); color: var(--green); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 100px; }
+        .sidebar-foot { padding: 16px 12px; border-top: 1px solid var(--border); }
+        .sign-out { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--muted); transition: all .15s; background: none; border: none; width: 100%; font-family: 'DM Sans', sans-serif; }
+        .sign-out:hover { color: var(--red); background: rgba(239,68,68,0.07); }
 
-          {/* ══ SHOP ═════════════════════════════════════════ */}
-          {tab === 'shop' && !selectedProduct && (
-            <>
-              <Box>
-                <Heading size="lg">Welcome, {session?.user?.name} 👋</Heading>
-                <Text color="gray.500" fontSize="sm">
-                  Browse products — payments held in escrow until you confirm delivery.
-                </Text>
-              </Box>
+        /* MAIN */
+        .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .topbar { padding: 20px 32px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--navy); position: sticky; top: 0; z-index: 10; gap: 16px; }
+        .topbar-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.3px; }
+        .topbar-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+        .topbar-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+        .content { padding: 28px 32px; flex: 1; }
 
-              <Input placeholder="🔍 Search products..." value={search}
-                onChange={e => setSearch(e.target.value)} bg="white" maxW="360px" />
+        /* SEARCH */
+        .search-wrap { position: relative; }
+        .search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; color: var(--muted); pointer-events: none; }
+        .search-input { width: 240px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 9px 14px 9px 36px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13px; outline: none; transition: border-color .2s; }
+        .search-input::placeholder { color: var(--muted); }
+        .search-input:focus { border-color: var(--accent); }
 
-              <HStack gap={2} flexWrap="wrap">
-                {CATEGORIES.map(cat => (
-                  <Button key={cat} size="sm" borderRadius="full"
-                    variant={category === cat ? 'solid' : 'outline'}
-                    colorPalette="blue"
-                    onClick={() => { setCategory(cat); fetchProducts(cat); }}>
-                    {cat}
-                  </Button>
-                ))}
-              </HStack>
+        /* CART BUTTON */
+        .cart-btn { position: relative; display: flex; align-items: center; gap: 8px; padding: 9px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+        .cart-btn:hover { border-color: var(--accent); }
+        .cart-btn.has-items { border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); }
+        .cart-count { background: var(--green); color: #fff; font-size: 11px; font-weight: 700; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 
-              {fetching ? (
-                <Box w="full" textAlign="center" py={20} color="gray.400">Loading products...</Box>
-              ) : (
-                <Grid templateColumns="repeat(auto-fill, minmax(240px, 1fr))" gap={5} w="full">
-                  {filtered.map(product => (
-                    <GridItem key={product.id}>
-                      <Box bg="white" borderRadius="2xl" shadow="sm"
-                        border="1px solid" borderColor="gray.200" overflow="hidden"
-                        transition="all 0.2s"
-                        _hover={{ shadow: 'lg', transform: 'translateY(-3px)' }}>
+        /* CART DRAWER */
+        .cart-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; }
+        .cart-drawer { position: fixed; right: 0; top: 0; bottom: 0; width: 400px; background: var(--navy); border-left: 1px solid var(--border2); z-index: 201; display: flex; flex-direction: column; animation: slideIn .2s ease; }
+        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        .cart-head { padding: 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .cart-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 18px; }
+        .cart-close { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+        .cart-close:hover { border-color: var(--border2); color: var(--text); }
+        .cart-items { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+        .cart-item { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: flex; gap: 12px; align-items: center; }
+        .cart-item-img { width: 56px; height: 56px; border-radius: 8px; overflow: hidden; position: relative; flex-shrink: 0; background: var(--deep); }
+        .cart-item-img img { object-fit: cover; }
+        .cart-item-info { flex: 1; min-width: 0; }
+        .cart-item-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+        .cart-item-price { font-size: 13px; color: var(--accent); font-weight: 600; }
+        .cart-item-actions { display: flex; align-items: center; gap: 0; }
+        .qty-btn { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border); background: var(--deep); color: var(--text); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+        .qty-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .qty-val { width: 32px; text-align: center; font-size: 13px; font-weight: 600; }
+        .cart-remove { width: 26px; height: 26px; border-radius: 6px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.08); color: var(--red); font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; margin-left: 8px; transition: all .15s; }
+        .cart-remove:hover { background: rgba(239,68,68,0.18); }
 
-                        <Box position="relative" h="190px" bg="gray.100">
-                          <Image src={product.image_url} alt={product.name}
-                            fill style={{ objectFit: 'cover' }} unoptimized />
-                          <Box position="absolute" top={2} right={2}>
-                            <Badge colorPalette="blue" borderRadius="full" fontSize="10px" px={2}>
-                              {product.category}
-                            </Badge>
-                          </Box>
-                        </Box>
+        .cart-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }
+        .cart-empty-icon { font-size: 40px; }
 
-                        <Box p={4}>
-                          <VStack align="start" gap={2}>
-                            <Text fontWeight="bold" fontSize="sm" lineClamp={1}>{product.name}</Text>
-                            <Text fontSize="xs" color="gray.500" lineClamp={2} minH="32px">
-                              {product.description}
-                            </Text>
-                            <HStack justify="space-between" w="full">
-                              <Text fontWeight="bold" color="blue.600" fontSize="md">
-                                {Number(product.price).toLocaleString()} RWF
-                              </Text>
-                              <Text fontSize="10px" color="gray.400">{product.seller_name}</Text>
-                            </HStack>
-                            <Button w="full" colorPalette="blue" size="sm" borderRadius="lg"
-                              onClick={() => setSelectedProduct(product)}>
-                              🔐 Buy with Escrow
-                            </Button>
-                          </VStack>
-                        </Box>
-                      </Box>
-                    </GridItem>
-                  ))}
-                  {filtered.length === 0 && (
-                    <GridItem colSpan={4}>
-                      <Box bg="white" p={10} borderRadius="xl" textAlign="center" color="gray.400">
-                        No products found
-                      </Box>
-                    </GridItem>
-                  )}
-                </Grid>
+        .cart-foot { padding: 16px; border-top: 1px solid var(--border); }
+        .cart-total-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+        .cart-total-label { font-size: 13px; color: var(--muted); }
+        .cart-total-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 22px; color: var(--accent); }
+        .pay-select { width: 100%; background: var(--deep); border: 1px solid var(--border); border-radius: 9px; padding: 11px 14px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color .2s; margin-bottom: 12px; }
+        .pay-select:focus { border-color: var(--accent); }
+        .pay-select option { background: #0D1526; }
+
+        /* CATEGORIES */
+        .cat-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+        .cat-pill { padding: 6px 14px; border-radius: 100px; font-size: 12px; font-weight: 500; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; transition: all .15s; white-space: nowrap; }
+        .cat-pill:hover { border-color: var(--border2); color: var(--text); }
+        .cat-pill.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: var(--accent); }
+
+        /* STAT CARDS */
+        .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 28px; }
+        .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px; position: relative; overflow: hidden; }
+        .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+        .stat-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 26px; letter-spacing: -0.5px; }
+        .stat-icon  { position: absolute; right: 16px; top: 16px; font-size: 20px; opacity: 0.35; }
+
+        /* PRODUCTS */
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+        .product-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; transition: border-color .2s, transform .2s; }
+        .product-card:hover { border-color: var(--border2); transform: translateY(-2px); }
+        .product-img { position: relative; height: 175px; background: var(--deep); }
+        .product-img img { object-fit: cover; }
+        .product-cat { position: absolute; top: 10px; right: 10px; background: rgba(59,130,246,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .in-cart-badge { position: absolute; top: 10px; left: 10px; background: rgba(16,185,129,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; }
+        .product-body { padding: 14px; }
+        .product-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .product-desc { font-size: 12px; color: var(--muted); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 36px; }
+        .product-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+        .product-price { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 15px; color: var(--accent); }
+        .product-seller { font-size: 11px; color: var(--muted); }
+        .add-btn { width: 100%; margin-top: 12px; padding: 10px; border-radius: 9px; background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25); color: var(--accent); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
+        .add-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .add-btn.in-cart { background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.3); color: var(--green); }
+        .add-btn.in-cart:hover { background: var(--green); color: #fff; border-color: var(--green); }
+
+        /* BUTTONS */
+        .btn { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px; border-radius: 9px; font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; border: none; white-space: nowrap; }
+        .btn-blue  { background: var(--accent); color: #fff; box-shadow: 0 0 20px rgba(59,130,246,0.25); }
+        .btn-blue:hover  { background: var(--accent2); transform: translateY(-1px); }
+        .btn-green { background: var(--green); color: #fff; }
+        .btn-green:hover { background: #059669; }
+        .btn-red-outline { background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+        .btn-red-outline:hover { background: rgba(239,68,68,0.18); }
+        .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
+        .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+        .btn-lg { padding: 13px 24px; font-size: 15px; border-radius: 10px; width: 100%; justify-content: center; }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+        .back-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; padding: 6px 0; margin-bottom: 20px; transition: color .15s; }
+        .back-btn:hover { color: var(--text); }
+
+        /* RECEIPT */
+        .receipt-wrap { max-width: 600px; margin: 0 auto; }
+        .receipt-header { background: linear-gradient(135deg, #065f46, #047857); border-radius: 14px 14px 0 0; padding: 28px 24px; text-align: center; }
+        .receipt-icon { font-size: 36px; margin-bottom: 8px; }
+        .receipt-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; color: #fff; margin-bottom: 4px; }
+        .receipt-sub { font-size: 13px; color: rgba(255,255,255,0.65); }
+        .receipt-body { background: var(--panel); border: 1px solid var(--border); border-top: none; border-radius: 0 0 14px 14px; padding: 24px; }
+        .receipt-item { background: var(--deep); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+        .receipt-item-name { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+        .receipt-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
+        .receipt-row:last-child { border-bottom: none; }
+        .receipt-row-label { font-size: 12px; color: var(--muted); }
+        .receipt-row-value { font-size: 12px; font-weight: 500; }
+        .tx-box { background: var(--deep); border-radius: 8px; padding: 8px 12px; margin-top: 6px; }
+        .tx-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
+        .tx-value { font-size: 11px; font-family: monospace; color: var(--accent); word-break: break-all; }
+        .notice { padding: 10px 14px; border-radius: 9px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+
+        /* ORDERS */
+        .order-list { display: flex; flex-direction: column; gap: 10px; }
+        .order-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; transition: border-color .2s; }
+        .order-card:hover { border-color: var(--border2); }
+        .order-card.highlight { border-color: rgba(6,182,212,0.3); }
+        .order-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+        .order-name { font-weight: 600; font-size: 15px; }
+        .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 100px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .status-dot { width: 5px; height: 5px; border-radius: 50%; }
+        .order-meta { display: flex; gap: 24px; flex-wrap: wrap; }
+        .meta-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+        .meta-value { font-size: 13px; font-weight: 500; }
+        .divider { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+        /* OTP */
+        .otp-wrap { max-width: 500px; margin: 0 auto; }
+        .modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
+        .modal-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; margin-bottom: 4px; }
+        .modal-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+        .order-pill { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 10px; padding: 14px; margin-bottom: 20px; }
+        .order-pill-name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+        .order-pill-amount { font-size: 13px; color: var(--muted); }
+        .step-box { background: var(--deep); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; }
+        .step-box.active { border-color: rgba(59,130,246,0.3); }
+        .step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+        .step-num { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: var(--accent); }
+        .step-num.dim { background: rgba(255,255,255,0.04); border-color: var(--border); color: var(--muted); }
+        .step-title { font-size: 13px; font-weight: 600; }
+        .otp-display { background: rgba(16,185,129,0.08); border: 2px solid rgba(16,185,129,0.3); border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 12px; }
+        .otp-label { font-size: 11px; color: var(--green); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+        .otp-code  { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 42px; letter-spacing: 8px; color: var(--green); }
+        .otp-exp   { font-size: 12px; color: var(--muted); margin-top: 6px; }
+        .otp-email { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #93c5fd; margin-top: 8px; }
+        .otp-input { width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; color: var(--text); font-family: 'Syne', sans-serif; font-size: 32px; font-weight: 700; letter-spacing: 12px; text-align: center; outline: none; transition: border-color .2s; margin-bottom: 12px; }
+        .otp-input:focus { border-color: var(--accent); }
+        .otp-input::placeholder { color: var(--border2); letter-spacing: 4px; font-size: 24px; }
+        .otp-input:disabled { opacity: 0.4; }
+        .warning-box { background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.2); border-radius: 9px; padding: 10px 14px; font-size: 12px; color: #fcd34d; margin-top: 14px; }
+
+        /* DISPUTE */
+        .dispute-order-box { background: rgba(239,68,68,0.07); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 14px; margin-bottom: 20px; }
+        .dispute-order-name   { font-weight: 600; font-size: 15px; color: #fca5a5; margin-bottom: 4px; }
+        .dispute-order-amount { font-size: 13px; color: var(--muted); }
+        .dispute-textarea { width: 100%; background: var(--deep); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color .2s; resize: vertical; min-height: 120px; margin-bottom: 16px; }
+        .dispute-textarea:focus { border-color: var(--red); }
+        .dispute-textarea::placeholder { color: var(--muted); }
+
+        /* EMPTY */
+        .empty { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 60px 20px; text-align: center; }
+        .empty-icon { font-size: 40px; margin-bottom: 12px; }
+        .empty-title { font-family: 'Syne', sans-serif; font-size: 16px; margin-bottom: 6px; }
+        .empty-sub { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+        .delivered-alert { background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.25); border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #67e8f9; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+
+        @media (max-width: 900px) {
+          .sidebar { display: none; }
+          .stat-grid { grid-template-columns: repeat(2,1fr); }
+          .content { padding: 20px 16px; }
+          .topbar { padding: 16px 20px; }
+          .cart-drawer { width: 100%; }
+          .search-input { width: 160px; }
+        }
+      `}</style>
+
+      <div className="dash-wrap">
+
+        {/* SIDEBAR */}
+        <aside className="sidebar">
+          <div className="sidebar-logo">Safe<span>Pay</span></div>
+          <div className="sidebar-user">
+            <div className="avatar">{session?.user?.name?.charAt(0).toUpperCase() || 'B'}</div>
+            <div>
+              <div className="user-name">{session?.user?.name}</div>
+              <div className="user-role">Buyer</div>
+            </div>
+          </div>
+          <nav className="sidebar-nav">
+            {[
+              { key: 'shop'   as const, icon: '🛍️', label: 'Shop',      badge: 0,             badgeClass: 'nav-badge' },
+              { key: 'orders' as const, icon: '📦', label: 'My Orders', badge: orders.length, badgeClass: 'nav-badge' },
+            ].map(t => (
+              <div key={t.key}
+                className={`nav-item ${tab === t.key && !otpOrder && !disputeOrder && !checkoutDone ? 'active' : ''}`}
+                onClick={() => { setTab(t.key); goBack(); }}>
+                <span>{t.icon}</span>
+                <span style={{ flex: 1 }}>{t.label}</span>
+                {t.badge > 0 && <span className={t.badgeClass}>{t.badge}</span>}
+              </div>
+            ))}
+            {cartCount > 0 && (
+              <div className="nav-item" onClick={() => setCartOpen(true)} style={{ marginTop: 8, borderColor: 'rgba(16,185,129,0.2)', background: 'rgba(16,185,129,0.06)', color: 'var(--green)' }}>
+                <span>🛒</span>
+                <span style={{ flex: 1 }}>Cart</span>
+                <span className="nav-badge-green">{cartCount}</span>
+              </div>
+            )}
+          </nav>
+          <div className="sidebar-foot">
+            <button className="sign-out" onClick={() => signOut({ callbackUrl: '/' })}>
+              <span>🚪</span> Sign Out
+            </button>
+          </div>
+        </aside>
+
+        {/* MAIN */}
+        <div className="main">
+          <div className="topbar">
+            <div>
+              <div className="topbar-title">
+                {checkoutDone && '✅ Orders Placed'}
+                {otpOrder && '🔑 Confirm Delivery'}
+                {disputeOrder && '⚠️ Open Dispute'}
+                {!checkoutDone && !otpOrder && !disputeOrder && tab === 'shop' && '🛍️ Shop'}
+                {!checkoutDone && !otpOrder && !disputeOrder && tab === 'orders' && '📦 My Orders'}
+              </div>
+              <div className="topbar-sub">
+                {tab === 'shop' && !checkoutDone && 'All payments secured by smart contract escrow'}
+                {tab === 'orders' && !otpOrder && !disputeOrder && `${orders.length} order${orders.length !== 1 ? 's' : ''} total`}
+              </div>
+            </div>
+            <div className="topbar-right">
+              {tab === 'shop' && !checkoutDone && !otpOrder && !disputeOrder && (
+                <div className="search-wrap">
+                  <span className="search-icon">🔍</span>
+                  <input className="search-input" value={search} placeholder="Search..." onChange={e => setSearch(e.target.value)} />
+                </div>
               )}
-            </>
-          )}
+              <button className={`cart-btn ${cartCount > 0 ? 'has-items' : ''}`} onClick={() => setCartOpen(true)}>
+                🛒 Cart
+                {cartCount > 0 && <span className="cart-count">{cartCount}</span>}
+              </button>
+            </div>
+          </div>
 
-          {/* ══ BUY CONFIRMATION — inline, no dialog ════════ */}
-          {tab === 'shop' && selectedProduct && (
-            <Box w="full" maxW="520px" mx="auto">
-              <HStack mb={4}>
-                <Button variant="ghost" size="sm" colorPalette="blue"
-                  onClick={() => setSelectedProduct(null)}>
-                  ← Back to Shop
-                </Button>
-              </HStack>
+          <div className="content">
 
-              <Box bg="white" borderRadius="2xl" shadow="sm"
-                border="1px solid" borderColor="gray.200" overflow="hidden">
+            {/* SHOP */}
+            {tab === 'shop' && !checkoutDone && !otpOrder && !disputeOrder && (
+              <>
+                <div className="cat-row">
+                  {CATEGORIES.map(cat => (
+                    <button key={cat} className={`cat-pill ${category === cat ? 'active' : ''}`}
+                      onClick={() => { setCategory(cat); fetchProducts(cat); }}>
+                      {cat}
+                    </button>
+                  ))}
+                </div>
 
-                <Box position="relative" h="240px">
-                  <Image src={selectedProduct.image_url} alt={selectedProduct.name}
-                    fill style={{ objectFit: 'cover' }} unoptimized />
-                </Box>
-
-                <Box p={6}>
-                  <VStack align="start" gap={4}>
-                    <Box>
-                      <Text fontWeight="bold" fontSize="xl">{selectedProduct.name}</Text>
-                      <Text fontSize="sm" color="gray.500" mt={1}>{selectedProduct.description}</Text>
-                      <Text fontSize="xs" color="gray.400" mt={1}>
-                        Sold by {selectedProduct.seller_name}
-                      </Text>
-                    </Box>
-
-                    <HStack justify="space-between" w="full" bg="blue.50"
-                      p={4} borderRadius="lg">
-                      <Text fontWeight="semibold" color="blue.700">Total Amount</Text>
-                      <Text fontWeight="bold" fontSize="2xl" color="blue.600">
-                        {Number(selectedProduct.price).toLocaleString()} RWF
-                      </Text>
-                    </HStack>
-
-                    <Box w="full" bg="yellow.50" border="1px solid" borderColor="yellow.200"
-                      borderRadius="lg" p={3}>
-                      <Text fontSize="xs" color="yellow.800">
-                        🔐 Your payment is held in escrow and only released to the seller after you confirm delivery with an OTP code.
-                      </Text>
-                    </Box>
-
-                    <Field.Root w="full">
-                      <Field.Label>Payment Method</Field.Label>
-                      <select value={payMethod} onChange={e => setPayMethod(e.target.value)}
-                        style={{ width:'100%', padding:'10px 12px', borderRadius:'8px',
-                          border:'1px solid #E2E8F0', fontSize:'14px', background:'white' }}>
-                        <option value="mobile_money">📱 Mobile Money</option>
-                        <option value="bank_transfer">🏦 Bank Transfer</option>
-                      </select>
-                    </Field.Root>
-
-                    <Button w="full" colorPalette="blue" size="lg" borderRadius="xl"
-                      onClick={handleBuy} loading={buyLoading}
-                      loadingText="Placing order...">
-                      🔐 Place Order & Lock in Escrow
-                    </Button>
-                  </VStack>
-                </Box>
-              </Box>
-            </Box>
-          )}
-
-          {/* ══ ORDERS ═══════════════════════════════════════ */}
-          {tab === 'orders' && !otpOrder && !disputeOrder && (
-            <>
-              <Box>
-                <Heading size="lg">My Orders</Heading>
-                <Text color="gray.500">Track purchases and confirm deliveries</Text>
-              </Box>
-
-              <Grid templateColumns="repeat(4, 1fr)" gap={4} w="full">
-                {[
-                  { label: 'Total',     value: orders.length, color: 'blue.600' },
-                  { label: 'In Escrow', value: inEscrow,      color: 'purple.600' },
-                  { label: 'Completed', value: completed,     color: 'green.600' },
-                  { label: 'Disputed',  value: disputed,      color: 'red.600' },
-                ].map(s => (
-                  <GridItem key={s.label}>
-                    <Box bg="white" p={4} borderRadius="xl" shadow="sm"
-                      border="1px solid" borderColor="gray.200">
-                      <Stat.Root>
-                        <Stat.Label color="gray.500" fontSize="xs">{s.label}</Stat.Label>
-                        <Stat.ValueText fontSize="2xl" color={s.color}>{s.value}</Stat.ValueText>
-                      </Stat.Root>
-                    </Box>
-                  </GridItem>
-                ))}
-              </Grid>
-
-              <VStack gap={3} align="stretch" w="full">
-                {orders.length === 0 ? (
-                  <Box bg="white" p={10} borderRadius="xl" textAlign="center">
-                    <Text color="gray.400" mb={3}>No orders yet.</Text>
-                    <Button colorPalette="blue" size="sm" onClick={() => setTab('shop')}>
-                      Browse Products →
-                    </Button>
-                  </Box>
+                {fetching ? (
+                  <div className="empty"><div className="empty-icon">⏳</div><div className="empty-title">Loading products...</div></div>
+                ) : filtered.length === 0 ? (
+                  <div className="empty"><div className="empty-icon">🔍</div><div className="empty-title">No products found</div><div className="empty-sub">Try a different search or category</div></div>
                 ) : (
-                  orders.map(order => {
-                    const o = order as OrderWithSeller;
-                    return (
-                      <Box key={order.id} bg="white" borderRadius="xl" shadow="sm"
-                        border="1px solid" borderColor="gray.200" p={5}>
-                        <VStack align="start" gap={3}>
-                          <HStack justify="space-between" w="full">
-                            <Text fontWeight="bold">{order.item_name}</Text>
-                            <Badge colorPalette={STATUS_COLOR[order.status]}
-                              borderRadius="full" px={3}>
-                              {order.status.replace('_', ' ').toUpperCase()}
-                            </Badge>
-                          </HStack>
-
-                          <Separator />
-
-                          <HStack gap={6} flexWrap="wrap">
-                            <VStack align="start" gap={0}>
-                              <Text fontSize="xs" color="gray.400">Amount</Text>
-                              <Text fontWeight="semibold">{Number(order.amount).toLocaleString()} RWF</Text>
-                            </VStack>
-                            {o.seller_name && (
-                              <VStack align="start" gap={0}>
-                                <Text fontSize="xs" color="gray.400">Seller</Text>
-                                <Text fontWeight="semibold">{o.seller_name}</Text>
-                              </VStack>
-                            )}
-                            <VStack align="start" gap={0}>
-                              <Text fontSize="xs" color="gray.400">Date</Text>
-                              <Text fontWeight="semibold">
-                                {new Date(order.created_at).toLocaleDateString()}
-                              </Text>
-                            </VStack>
-                          </HStack>
-
-                          {/* Status-based actions */}
-                          {order.status === 'delivered' && (
-                            <HStack gap={2} pt={1} flexWrap="wrap">
-                              <Button size="sm" colorPalette="green"
-                                onClick={() => { setOtpOrder(order); setGeneratedOtp(null); setOtpInput(''); }}>
-                                ✅ Confirm Delivery (OTP)
-                              </Button>
-                              <Button size="sm" colorPalette="red" variant="outline"
-                                onClick={() => { setDisputeOrder(order); setDisputeReason(''); }}>
-                                ⚠️ Open Dispute
-                              </Button>
-                            </HStack>
-                          )}
-                          {['pending','paid','in_escrow'].includes(order.status) && (
-                            <HStack gap={2} pt={1}>
-                              <Box bg="blue.50" px={3} py={2} borderRadius="lg" flex={1}>
-                                <Text fontSize="xs" color="blue.600">
-                                  🔐 Payment locked — waiting for seller to mark as delivered
-                                </Text>
-                              </Box>
-                              <Button size="xs" colorPalette="red" variant="ghost"
-                                onClick={() => { setDisputeOrder(order); setDisputeReason(''); }}>
-                                Dispute
-                              </Button>
-                            </HStack>
-                          )}
-                          {order.status === 'completed' && (
-                            <Box bg="green.50" px={3} py={2} borderRadius="lg">
-                              <Text fontSize="xs" color="green.600">✅ Delivered — payment released to seller</Text>
-                            </Box>
-                          )}
-                          {order.status === 'refunded' && (
-                            <Box bg="orange.50" px={3} py={2} borderRadius="lg">
-                              <Text fontSize="xs" color="orange.600">💰 Refunded by admin</Text>
-                            </Box>
-                          )}
-                          {order.status === 'disputed' && (
-                            <Box bg="red.50" px={3} py={2} borderRadius="lg">
-                              <Text fontSize="xs" color="red.600">⚠️ Dispute under review</Text>
-                            </Box>
-                          )}
-                        </VStack>
-                      </Box>
-                    );
-                  })
+                  <div className="product-grid">
+                    {filtered.map(product => (
+                      <div className="product-card" key={product.id}>
+                        <div className="product-img">
+                          <Image src={product.image_url} alt={product.name} fill style={{ objectFit: 'cover' }} unoptimized />
+                          <span className="product-cat">{product.category}</span>
+                          {inCartIds.has(product.id) && <span className="in-cart-badge">✓ In Cart</span>}
+                        </div>
+                        <div className="product-body">
+                          <div className="product-name">{product.name}</div>
+                          <div className="product-desc">{product.description}</div>
+                          <div className="product-foot">
+                            <span className="product-price">{Number(product.price).toLocaleString()} RWF</span>
+                            <span className="product-seller">{product.seller_name}</span>
+                          </div>
+                          <button className={`add-btn ${inCartIds.has(product.id) ? 'in-cart' : ''}`}
+                            onClick={() => addToCart(product)}>
+                            {inCartIds.has(product.id) ? '✓ Add More' : '🛒 Add to Cart'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
-              </VStack>
-            </>
-          )}
+              </>
+            )}
 
-          {/* ══ OTP CONFIRMATION — inline ════════════════════ */}
-{tab === 'orders' && otpOrder && (
-  <Box w="full" maxW="520px" mx="auto">
-    <HStack mb={4}>
-      <Button variant="ghost" size="sm" colorPalette="blue"
-        onClick={() => { setOtpOrder(null); setGeneratedOtp(null); setOtpInput(''); }}>
-        ← Back to Orders
-      </Button>
-    </HStack>
+            {/* CHECKOUT RECEIPT */}
+            {checkoutDone && lastReceipts.length > 0 && (
+              <div className="receipt-wrap">
+                <div className="receipt-header">
+                  <div className="receipt-icon">🎉</div>
+                  <div className="receipt-title">{lastReceipts.length} Order{lastReceipts.length > 1 ? 's' : ''} Confirmed!</div>
+                  <div className="receipt-sub">All funds safely locked in escrow</div>
+                </div>
+                <div className="receipt-body">
+                  {lastReceipts.map((r, i) => (
+                    <div className="receipt-item" key={i}>
+                      <div className="receipt-item-name">{r.item_name}</div>
+                      <div className="receipt-row"><span className="receipt-row-label">Amount</span><span className="receipt-row-value">{r.amount.toLocaleString()} RWF</span></div>
+                      <div className="receipt-row"><span className="receipt-row-label">Method</span><span className="receipt-row-value">{methodLabel[r.method] || r.method}</span></div>
+                      <div className="receipt-row"><span className="receipt-row-label">Reference</span><span className="receipt-row-value">{r.gateway_ref}</span></div>
+                      <div className="tx-box"><div className="tx-label">TX Hash</div><div className="tx-value">{r.tx_hash}</div></div>
+                    </div>
+                  ))}
+                  <div className="notice" style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.15)', color: '#93c5fd', marginBottom: 16, marginTop: 8 }}>
+                    📦 Orders are with sellers. Payment releases after you confirm each delivery.
+                  </div>
+                  <button className="btn btn-blue btn-lg" onClick={() => { goBack(); setTab('orders'); }}>
+                    View My Orders →
+                  </button>
+                </div>
+              </div>
+            )}
 
-    <Box bg="white" borderRadius="2xl" shadow="sm"
-      border="1px solid" borderColor="gray.200" p={6}>
-      <VStack gap={5} align="start">
+            {/* ORDERS */}
+            {tab === 'orders' && !otpOrder && !disputeOrder && !checkoutDone && (
+              <>
+                <div className="stat-grid">
+                  {[
+                    { label: 'Total Orders', value: orders.length, color: '#3B82F6', icon: '📦' },
+                    { label: 'In Escrow',    value: inEscrow,      color: '#8B5CF6', icon: '🔐' },
+                    { label: 'Completed',    value: completed,     color: '#10B981', icon: '✅' },
+                    { label: 'Disputed',     value: disputed,      color: '#EF4444', icon: '⚠️' },
+                  ].map(s => (
+                    <div className="stat-card" key={s.label}>
+                      <span className="stat-icon">{s.icon}</span>
+                      <div className="stat-label">{s.label}</div>
+                      <div className="stat-value" style={{ color: s.color }}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
 
-        <Box>
-          <Heading size="md">Confirm Delivery</Heading>
-          <Text fontSize="sm" color="gray.500" mt={1}>
-            Verify you received your item to release payment to the seller.
-          </Text>
-        </Box>
+                {delivered > 0 && (
+                  <div className="delivered-alert">
+                    🔔 {delivered} order{delivered > 1 ? 's' : ''} awaiting your delivery confirmation
+                  </div>
+                )}
 
-        {/* Order summary */}
-        <Box w="full" bg="blue.50" border="1px solid" borderColor="blue.100"
-          borderRadius="xl" p={4}>
-          <Text fontWeight="bold" color="blue.700">{otpOrder.item_name}</Text>
-          <Text fontSize="sm" color="blue.600">
-            {Number(otpOrder.amount).toLocaleString()} RWF · locked in escrow
-          </Text>
-        </Box>
+                <div className="order-list">
+                  {orders.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty-icon">🛍️</div>
+                      <div className="empty-title">No orders yet</div>
+                      <div className="empty-sub">Start shopping and your orders will appear here</div>
+                      <button className="btn btn-blue" onClick={() => setTab('shop')}>Browse Products →</button>
+                    </div>
+                  ) : orders.map(order => {
+                    const sc = STATUS_STYLE[order.status] || STATUS_STYLE.pending;
+                    return (
+                      <div key={order.id} className={`order-card ${order.status === 'delivered' ? 'highlight' : ''}`}>
+                        <div className="order-head">
+                          <span className="order-name">{order.item_name}</span>
+                          <span className="status-pill" style={{ background: sc.bg, color: sc.text }}>
+                            <span className="status-dot" style={{ background: sc.dot }} />
+                            {order.status.replace('_', ' ').toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="order-meta">
+                          <div><div className="meta-label">Amount</div><div className="meta-value">{Number(order.amount).toLocaleString()} RWF</div></div>
+                          {order.seller_name && <div><div className="meta-label">Seller</div><div className="meta-value">{order.seller_name}</div></div>}
+                          <div><div className="meta-label">Date</div><div className="meta-value">{new Date(order.created_at).toLocaleDateString()}</div></div>
+                        </div>
+                        {order.tx_hash && (
+                          <div className="tx-box" style={{ marginTop: 12 }}>
+                            <div className="tx-label">Transaction Hash</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div className="tx-value" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 }}>{order.tx_hash}</div>
+                              {order.tx_hash.startsWith('0x') && !order.tx_hash.startsWith('0xSIM') && (
+                                <a href={`https://sepolia.etherscan.io/tx/${order.tx_hash}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: 12, flexShrink: 0, textDecoration: 'none' }}>View ↗</a>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        <hr className="divider" />
+                        {order.status === 'delivered' && (
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button className="btn btn-green btn-sm" onClick={() => { setOtpOrder(order); setGeneratedOtp(null); setOtpInput(''); }}>✅ Confirm Delivery (OTP)</button>
+                            <button className="btn btn-red-outline btn-sm" onClick={() => { setDisputeOrder(order); setDisputeReason(''); }}>⚠️ Open Dispute</button>
+                          </div>
+                        )}
+                        {['pending','paid','in_escrow'].includes(order.status) && (
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <div className="notice" style={{ flex: 1, background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.15)', color: '#93c5fd' }}>🔐 Payment locked — waiting for seller to deliver</div>
+                            <button className="btn btn-red-outline btn-sm" onClick={() => { setDisputeOrder(order); setDisputeReason(''); }}>Dispute</button>
+                          </div>
+                        )}
+                        {order.status === 'completed' && <div className="notice" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.15)', color: '#6ee7b7' }}>✅ Delivered — payment released to seller</div>}
+                        {order.status === 'refunded' && <div className="notice" style={{ background: 'rgba(249,115,22,0.07)', border: '1px solid rgba(249,115,22,0.15)', color: '#fdba74' }}>💰 Refunded by admin</div>}
+                        {order.status === 'disputed' && <div className="notice" style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.15)', color: '#fca5a5' }}>⚠️ Dispute under review by admin</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
 
-        {/* Step 1 — send OTP to email */}
-        <Box w="full" border="1px solid" borderColor="gray.200" borderRadius="xl" p={4}>
-          <HStack mb={3}>
-            <Box w={6} h={6} borderRadius="full" bg="blue.600"
-              display="flex" alignItems="center" justifyContent="center">
-              <Text fontSize="xs" fontWeight="bold" color="white">1</Text>
-            </Box>
-            <Text fontSize="sm" fontWeight="bold" color="gray.700">
-              Send OTP to your email
-            </Text>
-          </HStack>
+            {/* OTP */}
+            {otpOrder && (
+              <div className="otp-wrap">
+                <button className="back-btn" onClick={() => { setOtpOrder(null); setGeneratedOtp(null); setOtpInput(''); }}>← Back to Orders</button>
+                <div className="modal-card">
+                  <div className="modal-title">Confirm Delivery</div>
+                  <div className="modal-sub">Verify you received your item to release payment to the seller</div>
+                  <div className="order-pill">
+                    <div className="order-pill-name">{otpOrder.item_name}</div>
+                    <div className="order-pill-amount">{Number(otpOrder.amount).toLocaleString()} RWF · locked in escrow</div>
+                  </div>
+                  <div className={`step-box ${!generatedOtp ? 'active' : ''}`}>
+                    <div className="step-head"><div className="step-num">1</div><div className="step-title">Generate your OTP</div></div>
+                    {!generatedOtp ? (
+                      <>
+                        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>OTP will appear here and be emailed to <strong style={{ color: 'var(--text)' }}>{session?.user?.email}</strong></p>
+                        <button className="btn btn-ghost" style={{ width: '100%', justifyContent: 'center' }} onClick={handleGenerateOtp} disabled={otpLoading}>
+                          {otpLoading ? '⏳ Generating…' : '📧 Generate & Send OTP'}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="otp-display"><div className="otp-label">Your OTP Code</div><div className="otp-code">{generatedOtp}</div><div className="otp-exp">⏱ Expires in 5 minutes</div></div>
+                        <div className="otp-email">📧 Also sent to {session?.user?.email}</div>
+                        <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => setGeneratedOtp(null)}>🔄 Regenerate</button>
+                      </>
+                    )}
+                  </div>
+                  <div className={`step-box ${generatedOtp ? 'active' : ''}`} style={{ opacity: generatedOtp ? 1 : 0.4 }}>
+                    <div className="step-head"><div className={`step-num ${generatedOtp ? '' : 'dim'}`}>2</div><div className="step-title">Enter OTP to release payment</div></div>
+                    <input className="otp-input" value={otpInput} placeholder="······" maxLength={6} disabled={!generatedOtp} onChange={e => setOtpInput(e.target.value.replace(/\D/g, ''))} />
+                    <button className="btn btn-green btn-lg" onClick={handleVerifyOtp} disabled={otpInput.length !== 6 || !generatedOtp || otpLoading}>
+                      {otpLoading ? '⏳ Verifying…' : '✅ Confirm Delivery & Release Payment'}
+                    </button>
+                  </div>
+                  <div className="warning-box">⚠️ Only confirm after you have <strong>physically received</strong> your item. This action is irreversible.</div>
+                </div>
+              </div>
+            )}
 
-          {!generatedOtp ? (
-            <VStack gap={2} align="start">
-              <Text fontSize="xs" color="gray.500">
-                We will send a 6-digit OTP to{' '}
-                <Text as="span" fontWeight="semibold" color="blue.600">
-                  {session?.user?.email}
-                </Text>
-              </Text>
-              <Button w="full" colorPalette="blue" variant="outline"
-                onClick={handleGenerateOtp} loading={otpLoading}
-                loadingText="Sending OTP...">
-                📧 Send OTP to My Email
-              </Button>
-            </VStack>
-          ) : (
-            <Box bg="green.50" border="1px solid" borderColor="green.200"
-              borderRadius="lg" p={3}>
-              <HStack>
-                <Text fontSize="lg">✅</Text>
-                <VStack align="start" gap={0}>
-                  <Text fontSize="sm" fontWeight="semibold" color="green.700">
-                    OTP sent successfully!
-                  </Text>
-                  <Text fontSize="xs" color="green.600">
-                    Check your email — {session?.user?.email}
-                  </Text>
-                  <Text fontSize="xs" color="green.500">⏱ Expires in 5 minutes</Text>
-                </VStack>
-              </HStack>
-              <Button mt={2} size="xs" variant="ghost" colorPalette="blue"
-                onClick={() => { setGeneratedOtp(null); }}> 
-                Resend OTP
-              </Button>
-            </Box>
-          )}
-        </Box>
+            {/* DISPUTE */}
+            {disputeOrder && (
+              <div className="otp-wrap">
+                <button className="back-btn" onClick={() => { setDisputeOrder(null); setDisputeReason(''); }}>← Back to Orders</button>
+                <div className="modal-card">
+                  <div className="modal-title">Open a Dispute</div>
+                  <div className="modal-sub">Admin will review your case and issue a refund if applicable</div>
+                  <div className="dispute-order-box">
+                    <div className="dispute-order-name">{disputeOrder.item_name}</div>
+                    <div className="dispute-order-amount">{Number(disputeOrder.amount).toLocaleString()} RWF</div>
+                  </div>
+                  <label style={{ fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: 8 }}>Describe the issue</label>
+                  <textarea className="dispute-textarea" value={disputeReason} onChange={e => setDisputeReason(e.target.value)} placeholder="e.g. Item not delivered, wrong item received, item damaged..." />
+                  <button className="btn btn-lg" style={{ background: 'rgba(239,68,68,0.12)', color: 'var(--red)', border: '1px solid rgba(239,68,68,0.3)', width: '100%', justifyContent: 'center' }}
+                    onClick={handleOpenDispute} disabled={!disputeReason.trim() || disputeLoading}>
+                    {disputeLoading ? '⏳ Submitting…' : '⚠️ Submit Dispute'}
+                  </button>
+                </div>
+              </div>
+            )}
 
-        {/* Step 2 — enter OTP */}
-        <Box w="full" border="1px solid"
-          borderColor={generatedOtp ? 'blue.200' : 'gray.100'}
-          borderRadius="xl" p={4}
-          opacity={generatedOtp ? 1 : 0.5}>
-          <HStack mb={3}>
-            <Box w={6} h={6} borderRadius="full"
-              bg={generatedOtp ? 'blue.600' : 'gray.300'}
-              display="flex" alignItems="center" justifyContent="center">
-              <Text fontSize="xs" fontWeight="bold" color="white">2</Text>
-            </Box>
-            <Text fontSize="sm" fontWeight="bold" color="gray.700">
-              Enter OTP from your email
-            </Text>
-          </HStack>
+          </div>
+        </div>
+      </div>
 
-          <VStack gap={3}>
-            <Input
-              value={otpInput}
-              onChange={e => setOtpInput(e.target.value.replace(/\D/g, ''))}
-              placeholder="• • • • • •"
-              maxLength={6}
-              textAlign="center"
-              fontSize="2xl"
-              letterSpacing="8px"
-              fontWeight="bold"
-              disabled={!generatedOtp}
-              bg={generatedOtp ? 'white' : 'gray.50'}
-            />
+      {/* CART DRAWER */}
+      {cartOpen && (
+        <>
+          <div className="cart-overlay" onClick={() => setCartOpen(false)} />
+          <div className="cart-drawer">
+            <div className="cart-head">
+              <div className="cart-title">🛒 Cart {cartCount > 0 && <span style={{ fontSize: 14, color: 'var(--muted)', fontWeight: 400 }}>({cartCount} item{cartCount !== 1 ? 's' : ''})</span>}</div>
+              <button className="cart-close" onClick={() => setCartOpen(false)}>✕</button>
+            </div>
 
-            <Button w="full" colorPalette="green" size="lg"
-              onClick={handleVerifyOtp}
-              disabled={otpInput.length !== 6 || !generatedOtp}
-              loading={otpLoading}
-              loadingText="Verifying...">
-              ✅ Confirm Delivery & Release Payment
-            </Button>
-          </VStack>
-        </Box>
+            {cart.length === 0 ? (
+              <div className="cart-empty">
+                <div className="cart-empty-icon">🛒</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>Your cart is empty</div>
+                <div style={{ fontSize: 12 }}>Add products from the shop</div>
+              </div>
+            ) : (
+              <div className="cart-items">
+                {cart.map(item => (
+                  <div className="cart-item" key={item.id}>
+                    <div className="cart-item-img">
+                      <Image src={item.image_url} alt={item.name} fill style={{ objectFit: 'cover' }} unoptimized />
+                    </div>
+                    <div className="cart-item-info">
+                      <div className="cart-item-name">{item.name}</div>
+                      <div className="cart-item-price">{(Number(item.price) * item.qty).toLocaleString()} RWF</div>
+                    </div>
+                    <div className="cart-item-actions">
+                      <button className="qty-btn" onClick={() => updateQty(item.id, -1)}>−</button>
+                      <span className="qty-val">{item.qty}</span>
+                      <button className="qty-btn" onClick={() => updateQty(item.id, 1)}>+</button>
+                      <button className="cart-remove" onClick={() => removeFromCart(item.id)}>✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
-        {/* Warning */}
-        <Box w="full" bg="yellow.50" border="1px solid" borderColor="yellow.200"
-          borderRadius="lg" p={3}>
-          <Text fontSize="xs" color="yellow.800">
-            ⚠️ Only confirm delivery after you have <strong>physically received</strong> your item.
-            Once confirmed, payment is permanently released to the seller.
-          </Text>
-        </Box>
-
-      </VStack>
-    </Box>
-  </Box>
-)}
-
-          {/* ══ DISPUTE — inline ═════════════════════════════ */}
-          {tab === 'orders' && disputeOrder && (
-            <Box w="full" maxW="520px" mx="auto">
-              <HStack mb={4}>
-                <Button variant="ghost" size="sm" colorPalette="blue"
-                  onClick={() => { setDisputeOrder(null); setDisputeReason(''); }}>
-                  ← Back to Orders
-                </Button>
-              </HStack>
-
-              <Box bg="white" borderRadius="2xl" shadow="sm"
-                border="1px solid" borderColor="gray.200" p={6}>
-                <VStack gap={4} align="start">
-                  <Box>
-                    <Heading size="md">Open a Dispute</Heading>
-                    <Text fontSize="sm" color="gray.500" mt={1}>
-                      Admin will review and issue a refund if applicable.
-                    </Text>
-                  </Box>
-
-                  <Box w="full" bg="red.50" border="1px solid" borderColor="red.100"
-                    borderRadius="xl" p={4}>
-                    <Text fontWeight="bold" color="red.700">{disputeOrder.item_name}</Text>
-                    <Text fontSize="sm" color="red.600">
-                      {Number(disputeOrder.amount).toLocaleString()} RWF
-                    </Text>
-                  </Box>
-
-                  <Field.Root w="full">
-                    <Field.Label>Describe the issue</Field.Label>
-                    <Textarea
-                      value={disputeReason}
-                      onChange={e => setDisputeReason(e.target.value)}
-                      placeholder="e.g. Item was not delivered, wrong item received, item damaged on arrival..."
-                      rows={5}
-                    />
-                  </Field.Root>
-
-                  <Button w="full" colorPalette="red" size="lg"
-                    onClick={handleOpenDispute}
-                    disabled={!disputeReason.trim()}
-                    loading={disputeLoading}
-                    loadingText="Submitting...">
-                    ⚠️ Submit Dispute
-                  </Button>
-                </VStack>
-              </Box>
-            </Box>
-          )}
-
-        </VStack>
-      </Box>
-    </Box>
+            {cart.length > 0 && (
+              <div className="cart-foot">
+                <div className="cart-total-row">
+                  <span className="cart-total-label">Total ({cartCount} items)</span>
+                  <span className="cart-total-value">{cartTotal.toLocaleString()} RWF</span>
+                </div>
+                <select className="pay-select" value={payMethod} onChange={e => setPayMethod(e.target.value)}>
+                  <option value="mobile_money">📱 MTN Mobile Money</option>
+                  <option value="bank_transfer">🏦 Bank Transfer</option>
+                  <option value="crypto">⛓️ Crypto (Sepolia ETH)</option>
+                </select>
+                <button className="btn btn-blue btn-lg" onClick={handleCheckout} disabled={checkingOut}>
+                  {checkingOut ? `⏳ Processing ${cart.length} order${cart.length > 1 ? 's' : ''}…` : `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`}
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </>
   );
 }
