@@ -37,8 +37,9 @@ export async function POST(req: Request) {
        RETURNING order_id`,
       [paymentStatus, txHash]
     );
+    const updatedCount = updatedPayments.rowCount ?? 0;
 
-    if (status === "SUCCESSFUL" && updatedPayments.rowCount > 0) {
+    if (status === "SUCCESSFUL" && updatedCount > 0) {
       await query(
         `UPDATE orders
          SET status = 'in_escrow', tx_hash = COALESCE(tx_hash, $1), updated_at = NOW()
@@ -50,7 +51,7 @@ export async function POST(req: Request) {
     console.log("MoMo callback received:", {
       referenceId,
       status,
-      updatedPayments: updatedPayments.rowCount,
+      updatedPayments: updatedCount,
       reason: payload.reason,
       financialTransactionId: payload.financialTransactionId,
     });
@@ -59,7 +60,7 @@ export async function POST(req: Request) {
       received: true,
       referenceId,
       status,
-      updatedPayments: updatedPayments.rowCount,
+      updatedPayments: updatedCount,
     });
   } catch (err: unknown) {
     console.error("MoMo callback error:", err);

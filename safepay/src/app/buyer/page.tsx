@@ -2,7 +2,7 @@
 import Image from "next/image";
 import { signOut, useSession } from "next-auth/react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { toaster } from "@/components/ui/toaster";
 import { Order, Product } from "@/types";
 
@@ -21,7 +21,7 @@ const STATUS_STYLE: Record<string, { bg: string; text: string; dot: string }> = 
 type CartItem = Product & { qty: number };
 type OrderWithSeller = Order & { seller_name?: string; tx_hash?: string };
 
-export default function BuyerDashboard() {
+function BuyerDashboardContent() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
 
@@ -919,5 +919,13 @@ export default function BuyerDashboard() {
         </>
       )}
     </>
+  );
+}
+
+export default function BuyerDashboard() {
+  return (
+    <Suspense fallback={null}>
+      <BuyerDashboardContent />
+    </Suspense>
   );
 }
