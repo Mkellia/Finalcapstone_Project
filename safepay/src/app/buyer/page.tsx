@@ -44,6 +44,10 @@ export default function BuyerDashboard() {
   const [lastReceipts, setLastReceipts] = useState<Array<{
     item_name: string; amount: number; gateway_ref: string; tx_hash: string; method: string;
   }>>([]);
+  const [momoPhone, setMomoPhone] = useState('');
+  const [momoRef, setMomoRef] = useState<string | null>(null);
+  const [momoStatus, setMomoStatus] = useState('');
+  const [momoPaying, setMomoPaying] = useState(false);
 
   // ── otp ──────────────────────────────────────────────
   const [otpOrder, setOtpOrder]         = useState<OrderWithSeller | null>(null);
@@ -105,40 +109,122 @@ export default function BuyerDashboard() {
 
   // ── checkout (all cart items) ────────────────────────
   async function handleCheckout() {
-    if (cart.length === 0) return;
-    setCheckingOut(true);
-    const receipts: typeof lastReceipts = [];
-    let allOk = true;
+  if (cart.length === 0) return;
+  let momoReferenceForOrder: string | null = momoRef;
 
-    for (const item of cart) {
-      for (let q = 0; q < item.qty; q++) {
-        const res  = await fetch('/api/orders', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            seller_id: item.seller_id, item_name: item.name,
-            amount: item.price, payment_method: payMethod,
-          }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment });
-        } else {
-          toaster.create({ title: `❌ ${item.name}: ${data.error || 'failed'}`, type: 'error', duration: 4000 });
-          allOk = false;
-        }
+  // ✅ If user chose MoMo: pay FIRST for the whole cart total
+  if (payMethod === "mobile_money") {
+    if (!momoPhone.trim()) {
+      toaster.create({ title: "Enter MoMo phone number", type: "warning", duration: 3000 });
+      return;
+    }
+
+    setMomoPaying(true);
+    setMomoStatus("Sending MoMo prompt…");
+    setMomoRef(null);
+
+    // 1) Start MoMo RequestToPay
+    const payRes = await fetch("/api/payments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount: String(cartTotal),
+        phoneNumber: momoPhone.trim(),
+        orderId: `cart-${Date.now()}`,
+      }),
+    });
+
+    const payData = await payRes.json();
+    if (!payRes.ok) {
+      setMomoPaying(false);
+      setMomoStatus("");
+      toaster.create({ title: payData.error || "MoMo payment failed", type: "error", duration: 4000 });
+      return;
+    }
+
+    const referenceId = payData.referenceId as string;
+    setMomoRef(referenceId);
+    momoReferenceForOrder = referenceId;
+    setMomoStatus("Prompt sent. Approve on phone…");
+
+    // 2) Poll until SUCCESSFUL / FAILED (max 60s)
+    const start = Date.now();
+    let paidOk = false;
+
+    while (Date.now() - start < 60000) {
+      const stRes = await fetch(`/api/payments/${referenceId}`);
+      const stData = await stRes.json();
+      const s = stData?.status;
+
+      if (s) setMomoStatus(`Status: ${s}`);
+
+      if (s === "SUCCESSFUL") {
+        paidOk = true;
+        break;
+      }
+      if (s === "FAILED") {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+
+    if (!paidOk) {
+      setMomoPaying(false);
+      toaster.create({ title: "MoMo not approved / failed", type: "error", duration: 4000 });
+      return;
+    }
+
+    setMomoPaying(false);
+    setMomoStatus("✅ Payment successful!");
+  }
+
+  // ✅ After payment success (MoMo) OR for other methods, create the orders
+  setCheckingOut(true);
+
+  const receipts: typeof lastReceipts = [];
+  let allOk = true;
+
+  for (const item of cart) {
+    for (let q = 0; q < item.qty; q++) {
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          seller_id: item.seller_id,
+          item_name: item.name,
+          amount: item.price,
+          payment_method: payMethod,
+
+          // ✅ only for MoMo orders
+          momo_reference: payMethod === "mobile_money" ? momoReferenceForOrder : undefined,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: payMethod });
+      } else {
+        toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
+        allOk = false;
       }
     }
-
-    setCheckingOut(false);
-    if (receipts.length > 0) {
-      setLastReceipts(receipts);
-      setCheckoutDone(true);
-      setCart([]);
-      setCartOpen(false);
-      await fetchOrders();
-      if (allOk) toaster.create({ title: `✅ ${receipts.length} order${receipts.length > 1 ? 's' : ''} placed!`, type: 'success', duration: 5000 });
-    }
   }
+
+  setCheckingOut(false);
+
+  if (receipts.length > 0) {
+    setLastReceipts(receipts);
+    setCheckoutDone(true);
+    setCart([]);
+    setCartOpen(false);
+    setMomoPhone("");
+    setMomoRef(null);
+    setMomoStatus("");
+    await fetchOrders();
+    if (allOk) toaster.create({ title: `✅ ${receipts.length} order${receipts.length > 1 ? "s" : ""} placed!`, type: "success", duration: 5000 });
+  }
+}
 
   // ── otp ──────────────────────────────────────────────
   async function handleGenerateOtp() {
@@ -153,9 +239,14 @@ export default function BuyerDashboard() {
     if (res.ok) {
       setGeneratedOtp(data.otp);
       toaster.create({
-        title: data.email_sent ? `📧 OTP sent to ${session?.user?.email}` : '⚠️ Email failed — use code on screen',
+        title: data.email_sent
+          ? `📧 OTP sent to ${data.email_to || session?.user?.email}`
+          : `⚠️ Email failed${data.email_to ? ` (${data.email_to})` : ""} — use code on screen`,
         type: data.email_sent ? 'info' : 'warning', duration: 4000,
       });
+      if (!data.email_sent && data.email_error) {
+        toaster.create({ title: `Email error: ${data.email_error}`, type: 'error', duration: 5000 });
+      }
     } else {
       toaster.create({ title: data.error || 'Failed to generate OTP', type: 'error', duration: 3000 });
     }
@@ -776,13 +867,51 @@ export default function BuyerDashboard() {
                   <span className="cart-total-label">Total ({cartCount} items)</span>
                   <span className="cart-total-value">{cartTotal.toLocaleString()} RWF</span>
                 </div>
+
                 <select className="pay-select" value={payMethod} onChange={e => setPayMethod(e.target.value)}>
                   <option value="mobile_money">📱 MTN Mobile Money</option>
                   <option value="bank_transfer">🏦 Bank Transfer</option>
                   <option value="crypto">⛓️ Crypto (Sepolia ETH)</option>
                 </select>
-                <button className="btn btn-blue btn-lg" onClick={handleCheckout} disabled={checkingOut}>
-                  {checkingOut ? `⏳ Processing ${cart.length} order${cart.length > 1 ? 's' : ''}…` : `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`}
+
+                {payMethod === "mobile_money" && (
+                  <div style={{ marginBottom: 12 }}>
+                    <input
+                      className="pay-select"
+                      style={{ marginBottom: 8 }}
+                      placeholder="MoMo phone e.g. 25078xxxxxxx"
+                      value={momoPhone}
+                      onChange={(e) => setMomoPhone(e.target.value)}
+                    />
+
+                    {momoRef && (
+                      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+                        Ref: {momoRef}
+                      </div>
+                    )}
+
+                    {momoStatus && (
+                      <div style={{ fontSize: 12, color: "#93c5fd", marginBottom: 6 }}>
+                        {momoStatus}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  className="btn btn-blue btn-lg"
+                  onClick={handleCheckout}
+                  disabled={
+                    checkingOut ||
+                    momoPaying ||
+                    (payMethod === "mobile_money" && momoPhone.trim().length < 10)
+                  }
+                >
+                  {momoPaying
+                    ? "📱 Waiting for MoMo approval…"
+                    : checkingOut
+                      ? `⏳ Processing ${cart.length} order${cart.length > 1 ? "s" : ""}…`
+                      : `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`}
                 </button>
               </div>
             )}

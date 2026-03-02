@@ -35,7 +35,7 @@ export interface Payment {
   id: string;
   order_id: string;
   amount: number;
-  method: 'mobile_money' | 'bank_transfer';
+  method: 'mobile_money' | 'bank_transfer' | 'crypto';
   status: 'pending' | 'confirmed' | 'released' | 'refunded';
   tx_hash?: string;
   created_at: string;

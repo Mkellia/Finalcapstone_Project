@@ -6,10 +6,11 @@ import { query } from "@/lib/db";
 import { generateOTP } from "@/lib/otp";
 
 function createTransporter() {
+  const secure = String(process.env.SMTP_SECURE ?? "").toLowerCase() === "true";
   return nodemailer.createTransport({
     host:   process.env.SMTP_HOST!,
     port:   Number(process.env.SMTP_PORT!),
-    secure: false,
+    secure,
     auth: {
       user: process.env.SMTP_USER!,
       pass: process.env.SMTP_PASSWORD!,
@@ -93,13 +94,18 @@ export async function POST(req: NextRequest) {
 
       const order = orderRes.rows[0];
       let email_sent = false;
+      let email_error: string | null = null;
 
       if (order?.email) {
         try {
           await sendOtpEmail(order.email, order.name, otp, order.item_name);
           email_sent = true;
           console.log(`✅ OTP ${otp} sent to ${order.email}`);
-        } catch (emailErr) {
+        } catch (emailErr: unknown) {
+          email_error =
+            typeof emailErr === "object" && emailErr !== null && "message" in emailErr
+              ? String((emailErr as { message?: string }).message)
+              : "Unknown email error";
           console.error('❌ Email error:', emailErr);
         }
       }
@@ -108,6 +114,8 @@ export async function POST(req: NextRequest) {
         otp,                          // always return so UI can show it
         expires: expires.toISOString(),
         email_sent,
+        email_to: order?.email ?? null,
+        email_error,
       });
 
     } catch (err) {
