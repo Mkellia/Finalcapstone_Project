@@ -6,6 +6,9 @@ import { Suspense, useEffect, useState } from "react";
 import { toaster } from "@/components/ui/toaster";
 import { Order, Product } from "@/types";
 
+// ── Import the deployed contract ABI ─────────────────────────────────────────
+import { CREATE_ESCROW_ABI } from "../../../contracts/Safepayescrow.abi";
+
 const CATEGORIES = ['All', 'Shoes', 'Bags', 'Electronics', 'Fashion', 'Accessories', 'Beauty'];
 
 const STATUS_STYLE: Record<string, { bg: string; text: string; dot: string }> = {
@@ -24,6 +27,15 @@ type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] | object }) => Promise<unknown>;
 };
 
+// ── Contract config (set in .env.local) ──────────────────────────────────────
+const CONTRACT_ADDRESS  = process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS as string;
+const SEPOLIA_CHAIN_ID  = 11155111;
+const RWF_PER_ETH       = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH  || "4000000");
+const MIN_ESCROW_ETH    = Number(process.env.NEXT_PUBLIC_SEPOLIA_MIN_ESCROW_ETH || "0.00001");
+const EXPLORER_URL      = process.env.NEXT_PUBLIC_BLOCK_EXPLORER_URL || "https://sepolia.etherscan.io";
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function BuyerDashboardContent() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
@@ -41,17 +53,23 @@ function BuyerDashboardContent() {
   // ── cart ─────────────────────────────────────────────
   const [cart, setCart]           = useState<CartItem[]>([]);
   const [cartOpen, setCartOpen]   = useState(false);
-  const [payMethod, setPayMethod] = useState('mobile_money');
-  const [checkingOut, setCheckingOut] = useState(false);
+  const [payMethod, setPayMethod] = useState<'mobile_money' | 'crypto'>('mobile_money');
+  const [checkingOut, setCheckingOut]   = useState(false);
   const [checkoutDone, setCheckoutDone] = useState(false);
   const [lastReceipts, setLastReceipts] = useState<Array<{
     item_name: string; amount: number; gateway_ref: string; tx_hash: string; method: string;
   }>>([]);
+
+  // MoMo
   const [momoPhone, setMomoPhone] = useState('');
-  const [momoRef, setMomoRef] = useState<string | null>(null);
+  const [momoRef, setMomoRef]     = useState<string | null>(null);
   const [momoStatus, setMomoStatus] = useState('');
   const [momoPaying, setMomoPaying] = useState(false);
-  const [hasMetaMask, setHasMetaMask] = useState(false);
+
+  // MetaMask
+  const [hasMetaMask, setHasMetaMask]       = useState(false);
+  const [cryptoStep, setCryptoStep]         = useState<'idle' | 'signing' | 'waiting' | 'done'>('idle');
+  const [cryptoProgress, setCryptoProgress] = useState('');
 
   // ── otp ──────────────────────────────────────────────
   const [otpOrder, setOtpOrder]         = useState<OrderWithSeller | null>(null);
@@ -100,256 +118,276 @@ function BuyerDashboardContent() {
     setCartOpen(true);
   }
 
-  function removeFromCart(id: string) {
-    setCart(prev => prev.filter(i => i.id !== id));
-  }
-
+  function removeFromCart(id: string) { setCart(prev => prev.filter(i => i.id !== id)); }
   function updateQty(id: string, delta: number) {
-    setCart(prev => prev
-      .map(i => i.id === id ? { ...i, qty: Math.max(1, i.qty + delta) } : i)
-    );
+    setCart(prev => prev.map(i => i.id === id ? { ...i, qty: Math.max(1, i.qty + delta) } : i));
   }
 
   const cartTotal = cart.reduce((sum, i) => sum + Number(i.price) * i.qty, 0);
   const cartCount = cart.reduce((sum, i) => sum + i.qty, 0);
   const inCartIds = new Set(cart.map(i => i.id));
 
-  // ── checkout (all cart items) ────────────────────────
+  // ── CHECKOUT ─────────────────────────────────────────
   async function handleCheckout() {
-  if (cart.length === 0) return;
-  let momoReferenceForOrder: string | null = momoRef;
-  const cryptoPaidUnits: Array<{ order_id: string; item: CartItem; tx_hash: string }> = [];
+    if (cart.length === 0) return;
 
-  // ✅ If user chose MoMo: pay FIRST for the whole cart total
-  if (payMethod === "mobile_money") {
-    if (!momoPhone.trim()) {
-      toaster.create({ title: "Enter MoMo phone number", type: "warning", duration: 3000 });
-      return;
-    }
-
-    setMomoPaying(true);
-    setMomoStatus("Sending MoMo prompt…");
-    setMomoRef(null);
-
-    // 1) Start MoMo RequestToPay
-    const payRes = await fetch("/api/payments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        amount: String(cartTotal),
-        phoneNumber: momoPhone.trim(),
-        orderId: `cart-${Date.now()}`,
-      }),
-    });
-
-    const payData = await payRes.json();
-    if (!payRes.ok) {
-      setMomoPaying(false);
-      setMomoStatus("");
-      toaster.create({ title: payData.error || "MoMo payment failed", type: "error", duration: 4000 });
-      return;
-    }
-
-    const referenceId = payData.referenceId as string;
-    setMomoRef(referenceId);
-    momoReferenceForOrder = referenceId;
-    setMomoStatus("Prompt sent. Approve on phone…");
-
-    // 2) Poll until SUCCESSFUL / FAILED (max 60s)
-    const start = Date.now();
-    let paidOk = false;
-
-    while (Date.now() - start < 60000) {
-      const stRes = await fetch(`/api/payments/${referenceId}`);
-      const stData = await stRes.json();
-      const s = stData?.status;
-
-      if (s) setMomoStatus(`Status: ${s}`);
-
-      if (s === "SUCCESSFUL") {
-        paidOk = true;
-        break;
+    // ── MoMo path ────────────────────────────────────
+    if (payMethod === "mobile_money") {
+      if (!momoPhone.trim()) {
+        toaster.create({ title: "Enter MoMo phone number", type: "warning", duration: 3000 });
+        return;
       }
-      if (s === "FAILED") {
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 3000));
-    }
 
-    if (!paidOk) {
-      setMomoPaying(false);
-      toaster.create({ title: "MoMo not approved / failed", type: "error", duration: 4000 });
-      return;
-    }
+      setMomoPaying(true);
+      setMomoStatus("Sending MoMo prompt…");
+      setMomoRef(null);
 
-    setMomoPaying(false);
-    setMomoStatus("✅ Payment successful!");
-  }
-
-  // ✅ If user chose Crypto: pay each unit in MetaMask first
-  if (payMethod === "crypto") {
-    if (!(window as Window & { ethereum?: unknown }).ethereum) {
-      toaster.create({ title: "MetaMask not detected", type: "error", duration: 4000 });
-      return;
-    }
-
-    try {
-      setCheckingOut(true);
-      toaster.create({ title: "Open MetaMask to approve payment", type: "info", duration: 3000 });
-      const { ethers } = await import("ethers");
-      const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
-      if (!ethereum) throw new Error("MetaMask provider missing");
-      const provider = new ethers.BrowserProvider(ethereum);
-      await provider.send("eth_requestAccounts", []);
-
-      const rwfPerEth = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH || "4000000");
-      const minEscrowEth = Number(process.env.NEXT_PUBLIC_SEPOLIA_MIN_ESCROW_ETH || "0.00001");
-      const contractAbi = [
-        "function createEscrow(string orderId, address seller, bytes sig) payable",
-      ];
-
-      for (const item of cart) {
-        if (!item.seller_wallet_address) {
-          throw new Error(`${item.name}: seller wallet is not configured`);
-        }
-
-        for (let q = 0; q < item.qty; q++) {
-          const amountEth = Math.max(Number(item.price) / rwfPerEth, minEscrowEth);
-          const amountWei = ethers.parseEther(amountEth.toFixed(8));
-          const orderId = `ord-${Date.now()}-${item.id.slice(0, 6)}-${q}-${Math.random().toString(16).slice(2, 8)}`;
-
-          const sigRes = await fetch("/api/payments/crypto-sign", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              orderId,
-              seller: item.seller_wallet_address,
-              amountWei: amountWei.toString(),
-            }),
-          });
-          const sigData = await sigRes.json();
-          if (!sigRes.ok) {
-            throw new Error(sigData.error || `Failed to sign escrow for ${item.name}`);
-          }
-
-          const desiredChainId = Number(sigData.chainId || 11155111);
-          const currentHex = (await provider.send("eth_chainId", [])) as string;
-          const currentChainId = Number.parseInt(currentHex, 16);
-          if (currentChainId !== desiredChainId) {
-            await provider.send("wallet_switchEthereumChain", [
-              { chainId: `0x${desiredChainId.toString(16)}` },
-            ]);
-          }
-
-          const signer = await provider.getSigner();
-          const contract = new ethers.Contract(sigData.contractAddress, contractAbi, signer);
-          const tx = await contract.createEscrow(orderId, item.seller_wallet_address, sigData.signature, {
-            value: amountWei,
-          });
-          const receipt = await tx.wait();
-          const txHash = receipt?.hash || tx.hash;
-
-          cryptoPaidUnits.push({
-            order_id: orderId,
-            item,
-            tx_hash: txHash,
-          });
-        }
-      }
-    } catch (err: unknown) {
-      setCheckingOut(false);
-      const msg =
-        typeof err === "object" && err !== null && "message" in err
-          ? String((err as { message?: string }).message)
-          : "MetaMask payment failed";
-      toaster.create({ title: msg, type: "error", duration: 5000 });
-      return;
-    }
-  }
-
-  // ✅ After payment success (MoMo) OR for other methods, create the orders
-  setCheckingOut(true);
-
-  const receipts: typeof lastReceipts = [];
-  let allOk = true;
-
-  if (payMethod === "crypto") {
-    for (const unit of cryptoPaidUnits) {
-      const res = await fetch("/api/orders", {
+      const payRes = await fetch("/api/payments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          order_id: unit.order_id,
-          seller_id: unit.item.seller_id,
-          item_name: unit.item.name,
-          amount: unit.item.price,
-          payment_method: payMethod,
-          crypto_tx_hash: unit.tx_hash,
+          amount: String(cartTotal),
+          phoneNumber: momoPhone.trim(),
+          orderId: `cart-${Date.now()}`,
         }),
       });
-      const data = await res.json();
 
-      if (res.ok) {
-        receipts.push({
-          item_name: unit.item.name,
-          amount: Number(unit.item.price),
-          ...data.payment,
-          method: payMethod,
-        });
-      } else {
-        toaster.create({
-          title: `❌ ${unit.item.name}: ${data.error || "failed"}`,
-          type: "error",
-          duration: 4000,
-        });
-        allOk = false;
+      const payData = await payRes.json();
+      if (!payRes.ok) {
+        setMomoPaying(false);
+        setMomoStatus("");
+        toaster.create({ title: payData.error || "MoMo payment failed", type: "error", duration: 4000 });
+        return;
       }
+
+      const referenceId = payData.referenceId as string;
+      setMomoRef(referenceId);
+      setMomoStatus("Prompt sent. Approve on phone…");
+
+      // Poll up to 60s
+      const start = Date.now();
+      let paidOk = false;
+      while (Date.now() - start < 60000) {
+        const stRes  = await fetch(`/api/payments/${referenceId}`);
+        const stData = await stRes.json();
+        const s = stData?.status;
+        if (s) setMomoStatus(`Status: ${s}`);
+        if (s === "SUCCESSFUL") { paidOk = true; break; }
+        if (s === "FAILED")      break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      if (!paidOk) {
+        setMomoPaying(false);
+        toaster.create({ title: "MoMo not approved / failed", type: "error", duration: 4000 });
+        return;
+      }
+
+      setMomoPaying(false);
+      setMomoStatus("✅ Payment successful!");
+
+      // Create orders in DB for MoMo
+      setCheckingOut(true);
+      const receipts: typeof lastReceipts = [];
+      let allOk = true;
+
+      for (const item of cart) {
+        for (let q = 0; q < item.qty; q++) {
+          const res  = await fetch("/api/orders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              seller_id:      item.seller_id,
+              item_name:      item.name,
+              amount:         item.price,
+              payment_method: "mobile_money",
+              momo_reference: referenceId,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: "mobile_money" });
+          } else {
+            toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
+            allOk = false;
+          }
+        }
+      }
+
+      setCheckingOut(false);
+      if (receipts.length > 0) {
+        setLastReceipts(receipts);
+        setCheckoutDone(true);
+        setCart([]); setCartOpen(false);
+        setMomoPhone(""); setMomoRef(null); setMomoStatus("");
+        await fetchOrders();
+        if (allOk) toaster.create({ title: `✅ ${receipts.length} order(s) placed!`, type: "success", duration: 5000 });
+      }
+      return;
     }
-  } else {
-    for (const item of cart) {
-      for (let q = 0; q < item.qty; q++) {
-        const res = await fetch("/api/orders", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            seller_id: item.seller_id,
-            item_name: item.name,
-            amount: item.price,
-            payment_method: payMethod,
 
-            // ✅ only for MoMo orders
-            momo_reference: payMethod === "mobile_money" ? momoReferenceForOrder : undefined,
-          }),
-        });
+    // ── Crypto / MetaMask path ────────────────────────
+    if (payMethod === "crypto") {
+      const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
+      if (!ethereum) {
+        toaster.create({ title: "MetaMask not detected. Install MetaMask first.", type: "error", duration: 4000 });
+        return;
+      }
 
-        const data = await res.json();
+      if (!CONTRACT_ADDRESS) {
+        toaster.create({ title: "Contract address not configured (NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS)", type: "error", duration: 5000 });
+        return;
+      }
 
-        if (res.ok) {
-          receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: payMethod });
-        } else {
-          toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
-          allOk = false;
+      try {
+        setCheckingOut(true);
+        setCryptoStep('signing');
+        setCryptoProgress("Connecting to MetaMask…");
+
+        // 1. Import ethers dynamically (keeps bundle lean for non-crypto users)
+        const { ethers } = await import("ethers");
+        const provider = new ethers.BrowserProvider(ethereum);
+        await provider.send("eth_requestAccounts", []);
+
+        // 2. Ensure correct network (Sepolia)
+        const network = await provider.getNetwork();
+        if (Number(network.chainId) !== SEPOLIA_CHAIN_ID) {
+          setCryptoProgress("Switching to Sepolia network…");
+          await provider.send("wallet_switchEthereumChain", [
+            { chainId: `0x${SEPOLIA_CHAIN_ID.toString(16)}` },
+          ]);
+        }
+
+        const signer = await provider.getSigner();
+        const buyerAddress = await signer.getAddress();
+
+        // 3. Build the contract interface using the deployed ABI
+        //    CREATE_ESCROW_ABI is imported from lib/SafePayEscrow.abi.ts
+        const contract = new ethers.Contract(
+          CONTRACT_ADDRESS,
+          CREATE_ESCROW_ABI,
+          signer
+        );
+
+        const cryptoPaidUnits: Array<{ order_id: string; item: CartItem; tx_hash: string }> = [];
+        let unitIndex = 0;
+        const totalUnits = cart.reduce((s, i) => s + i.qty, 0);
+
+        // 4. Process each cart item × qty
+        for (const item of cart) {
+          if (!item.seller_wallet_address) {
+            throw new Error(`"${item.name}": seller has no wallet configured. Contact support.`);
+          }
+
+          for (let q = 0; q < item.qty; q++) {
+            unitIndex++;
+            const amountEth = Math.max(Number(item.price) / RWF_PER_ETH, MIN_ESCROW_ETH);
+            const amountWei = ethers.parseEther(amountEth.toFixed(8));
+
+            // Unique orderId per unit
+            const orderId = `ord-${Date.now()}-${item.id.slice(0, 6)}-${q}-${Math.random().toString(16).slice(2, 8)}`;
+
+            // 5. Get backend signature for this (orderId, seller, amountWei)
+            setCryptoProgress(`Signing escrow ${unitIndex}/${totalUnits}: ${item.name}…`);
+            const sigRes = await fetch("/api/payments/crypto-sign", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                orderId,
+                seller:    item.seller_wallet_address,
+                amountWei: amountWei.toString(),
+                buyer:     buyerAddress,
+              }),
+            });
+            const sigData = await sigRes.json();
+            if (!sigRes.ok) throw new Error(sigData.error || `Signing failed for ${item.name}`);
+
+            // 6. Send transaction to the SafePayEscrow contract via MetaMask
+            setCryptoStep('waiting');
+            setCryptoProgress(`Waiting for MetaMask approval (${unitIndex}/${totalUnits})…`);
+
+            const tx = await contract.createEscrow(
+              orderId,
+              item.seller_wallet_address,
+              sigData.signature,
+              { value: amountWei }
+            );
+
+            setCryptoProgress(`Mining tx ${unitIndex}/${totalUnits}…`);
+            const receipt = await tx.wait();
+            const txHash  = receipt?.hash ?? tx.hash;
+
+            cryptoPaidUnits.push({ order_id: orderId, item, tx_hash: txHash });
+            toaster.create({
+              title:       `⛓ ${item.name} locked in escrow`,
+              description: `tx: ${(txHash as string).slice(0, 20)}…`,
+              type:        "success",
+              duration:    4000,
+            });
+          }
+        }
+
+        // 7. Record each paid unit in the DB
+        setCryptoStep('done');
+        setCryptoProgress("Recording orders…");
+        const receipts: typeof lastReceipts = [];
+        let allOk = true;
+
+        for (const unit of cryptoPaidUnits) {
+          const res  = await fetch("/api/orders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              order_id:        unit.order_id,
+              seller_id:       unit.item.seller_id,
+              item_name:       unit.item.name,
+              amount:          unit.item.price,
+              payment_method:  "crypto",
+              crypto_tx_hash:  unit.tx_hash,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            receipts.push({
+              item_name:   unit.item.name,
+              amount:      Number(unit.item.price),
+              gateway_ref: unit.order_id,
+              tx_hash:     unit.tx_hash,
+              method:      "crypto",
+              ...data.payment,
+            });
+          } else {
+            toaster.create({ title: `❌ ${unit.item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
+            allOk = false;
+          }
+        }
+
+        setCheckingOut(false);
+        setCryptoStep('idle');
+        setCryptoProgress('');
+
+        if (receipts.length > 0) {
+          setLastReceipts(receipts);
+          setCheckoutDone(true);
+          setCart([]); setCartOpen(false);
+          await fetchOrders();
+          if (allOk) toaster.create({ title: `✅ ${receipts.length} order(s) placed on-chain!`, type: "success", duration: 5000 });
+        }
+
+      } catch (err: unknown) {
+        setCheckingOut(false);
+        setCryptoStep('idle');
+        setCryptoProgress('');
+        const msg = err instanceof Error ? err.message : "MetaMask payment failed";
+        // User rejected = silent, anything else = toast
+        if (!msg.includes("user rejected") && !msg.includes("User denied")) {
+          toaster.create({ title: msg, type: "error", duration: 6000 });
         }
       }
     }
   }
 
-  setCheckingOut(false);
-
-  if (receipts.length > 0) {
-    setLastReceipts(receipts);
-    setCheckoutDone(true);
-    setCart([]);
-    setCartOpen(false);
-    setMomoPhone("");
-    setMomoRef(null);
-    setMomoStatus("");
-    await fetchOrders();
-    if (allOk) toaster.create({ title: `✅ ${receipts.length} order${receipts.length > 1 ? "s" : ""} placed!`, type: "success", duration: 5000 });
-  }
-}
-
-  // ── otp ──────────────────────────────────────────────
+  // ── OTP ──────────────────────────────────────────────
   async function handleGenerateOtp() {
     if (!otpOrder) return;
     setOtpLoading(true);
@@ -364,12 +402,9 @@ function BuyerDashboardContent() {
       toaster.create({
         title: data.email_sent
           ? `📧 OTP sent to ${data.email_to || session?.user?.email}`
-          : `⚠️ Email failed${data.email_to ? ` (${data.email_to})` : ""} — use code on screen`,
+          : `⚠️ Email failed — use code on screen`,
         type: data.email_sent ? 'info' : 'warning', duration: 4000,
       });
-      if (!data.email_sent && data.email_error) {
-        toaster.create({ title: `Email error: ${data.email_error}`, type: 'error', duration: 5000 });
-      }
     } else {
       toaster.create({ title: data.error || 'Failed to generate OTP', type: 'error', duration: 3000 });
     }
@@ -392,7 +427,7 @@ function BuyerDashboardContent() {
     }
   }
 
-  // ── dispute ──────────────────────────────────────────
+  // ── Dispute ──────────────────────────────────────────
   async function handleOpenDispute() {
     if (!disputeOrder || !disputeReason.trim()) return;
     setDisputeLoading(true);
@@ -409,7 +444,7 @@ function BuyerDashboardContent() {
     }
   }
 
-  // ── stats ─────────────────────────────────────────────
+  // ── Stats ─────────────────────────────────────────────
   const completed = orders.filter(o => o.status === 'completed').length;
   const inEscrow  = orders.filter(o => ['in_escrow','paid','pending'].includes(o.status)).length;
   const disputed  = orders.filter(o => o.status === 'disputed').length;
@@ -421,15 +456,22 @@ function BuyerDashboardContent() {
   );
 
   const methodLabel: Record<string, string> = {
-    mobile_money:  '📱 MTN Mobile Money',
-    bank_transfer: '🏦 Bank Transfer',
-    crypto:        '⛓️ Crypto (Sepolia ETH)',
+    mobile_money: '📱 MTN Mobile Money',
+    crypto:       '⛓️ Crypto (Sepolia ETH)',
   };
 
   function goBack() {
     setOtpOrder(null); setGeneratedOtp(null); setOtpInput('');
     setDisputeOrder(null); setDisputeReason('');
     setCheckoutDone(false); setLastReceipts([]);
+  }
+
+  // ── MetaMask step label ───────────────────────────────
+  function cryptoButtonLabel() {
+    if (cryptoStep === 'signing')  return `✍️ Getting backend signature…`;
+    if (cryptoStep === 'waiting')  return `🦊 Approve in MetaMask…`;
+    if (cryptoStep === 'done')     return `⏳ Recording orders…`;
+    return `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`;
   }
 
   return (
@@ -443,18 +485,13 @@ function BuyerDashboardContent() {
           --accent: #3B82F6; --accent2: #2563EB;
           --text:   #E8EDF5; --muted: #7B8BAD;
           --green:  #10B981; --gold: #F59E0B; --red: #EF4444;
+          --purple: #8B5CF6;
         }
         body { background: var(--deep); color: var(--text); font-family: 'DM Sans', sans-serif; }
-
         .dash-wrap { display: flex; min-height: 100vh; }
 
         /* SIDEBAR */
-        .sidebar {
-          width: 240px; flex-shrink: 0; background: var(--navy);
-          border-right: 1px solid var(--border);
-          display: flex; flex-direction: column;
-          position: sticky; top: 0; height: 100vh;
-        }
+        .sidebar { width: 240px; flex-shrink: 0; background: var(--navy); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
         .sidebar-logo { padding: 28px 24px 20px; font-family: 'Syne', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: -0.5px; border-bottom: 1px solid var(--border); }
         .sidebar-logo span { color: var(--accent); }
         .sidebar-user { padding: 16px 20px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
@@ -494,7 +531,7 @@ function BuyerDashboardContent() {
 
         /* CART DRAWER */
         .cart-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; }
-        .cart-drawer { position: fixed; right: 0; top: 0; bottom: 0; width: 400px; background: var(--navy); border-left: 1px solid var(--border2); z-index: 201; display: flex; flex-direction: column; animation: slideIn .2s ease; }
+        .cart-drawer { position: fixed; right: 0; top: 0; bottom: 0; width: 420px; background: var(--navy); border-left: 1px solid var(--border2); z-index: 201; display: flex; flex-direction: column; animation: slideIn .2s ease; }
         @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
         .cart-head { padding: 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
         .cart-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 18px; }
@@ -503,27 +540,33 @@ function BuyerDashboardContent() {
         .cart-items { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
         .cart-item { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: flex; gap: 12px; align-items: center; }
         .cart-item-img { width: 56px; height: 56px; border-radius: 8px; overflow: hidden; position: relative; flex-shrink: 0; background: var(--deep); }
-        .cart-item-img img { object-fit: cover; }
         .cart-item-info { flex: 1; min-width: 0; }
         .cart-item-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
         .cart-item-price { font-size: 13px; color: var(--accent); font-weight: 600; }
-        .cart-item-actions { display: flex; align-items: center; gap: 0; }
+        .cart-item-actions { display: flex; align-items: center; }
         .qty-btn { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border); background: var(--deep); color: var(--text); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
         .qty-btn:hover { border-color: var(--accent); color: var(--accent); }
         .qty-val { width: 32px; text-align: center; font-size: 13px; font-weight: 600; }
         .cart-remove { width: 26px; height: 26px; border-radius: 6px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.08); color: var(--red); font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; margin-left: 8px; transition: all .15s; }
         .cart-remove:hover { background: rgba(239,68,68,0.18); }
-
         .cart-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }
-        .cart-empty-icon { font-size: 40px; }
 
         .cart-foot { padding: 16px; border-top: 1px solid var(--border); }
         .cart-total-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
         .cart-total-label { font-size: 13px; color: var(--muted); }
         .cart-total-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 22px; color: var(--accent); }
-        .pay-select { width: 100%; background: var(--deep); border: 1px solid var(--border); border-radius: 9px; padding: 11px 14px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color .2s; margin-bottom: 12px; }
-        .pay-select:focus { border-color: var(--accent); }
-        .pay-select option { background: #0D1526; }
+
+        /* Payment method tabs */
+        .pay-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+        .pay-tab { padding: 10px 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all .15s; text-align: center; }
+        .pay-tab:hover { border-color: var(--border2); color: var(--text); }
+        .pay-tab.active-momo { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.08); color: #F59E0B; }
+        .pay-tab.active-crypto { border-color: rgba(139,92,246,0.4); background: rgba(139,92,246,0.08); color: var(--purple); }
+
+        /* Crypto progress bar */
+        .crypto-progress { background: rgba(139,92,246,0.07); border: 1px solid rgba(139,92,246,0.2); border-radius: 9px; padding: 10px 14px; font-size: 12px; color: #c4b5fd; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+        .crypto-spinner { width: 14px; height: 14px; border: 2px solid rgba(139,92,246,0.3); border-top-color: var(--purple); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         /* CATEGORIES */
         .cat-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
@@ -543,7 +586,6 @@ function BuyerDashboardContent() {
         .product-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; transition: border-color .2s, transform .2s; }
         .product-card:hover { border-color: var(--border2); transform: translateY(-2px); }
         .product-img { position: relative; height: 175px; background: var(--deep); }
-        .product-img img { object-fit: cover; }
         .product-cat { position: absolute; top: 10px; right: 10px; background: rgba(59,130,246,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; text-transform: uppercase; letter-spacing: 0.5px; }
         .in-cart-badge { position: absolute; top: 10px; left: 10px; background: rgba(16,185,129,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; }
         .product-body { padding: 14px; }
@@ -669,15 +711,15 @@ function BuyerDashboardContent() {
           </div>
           <nav className="sidebar-nav">
             {[
-              { key: 'shop'   as const, icon: '🛍️', label: 'Shop',      badge: 0,             badgeClass: 'nav-badge' },
-              { key: 'orders' as const, icon: '📦', label: 'My Orders', badge: orders.length, badgeClass: 'nav-badge' },
+              { key: 'shop'   as const, icon: '🛍️', label: 'Shop',      badge: 0             },
+              { key: 'orders' as const, icon: '📦', label: 'My Orders', badge: orders.length },
             ].map(t => (
               <div key={t.key}
                 className={`nav-item ${tab === t.key && !otpOrder && !disputeOrder && !checkoutDone ? 'active' : ''}`}
                 onClick={() => { setTab(t.key); goBack(); }}>
                 <span>{t.icon}</span>
                 <span style={{ flex: 1 }}>{t.label}</span>
-                {t.badge > 0 && <span className={t.badgeClass}>{t.badge}</span>}
+                {t.badge > 0 && <span className="nav-badge">{t.badge}</span>}
               </div>
             ))}
             {cartCount > 0 && (
@@ -738,7 +780,6 @@ function BuyerDashboardContent() {
                     </button>
                   ))}
                 </div>
-
                 {fetching ? (
                   <div className="empty"><div className="empty-icon">⏳</div><div className="empty-title">Loading products...</div></div>
                 ) : filtered.length === 0 ? (
@@ -771,7 +812,7 @@ function BuyerDashboardContent() {
               </>
             )}
 
-            {/* CHECKOUT RECEIPT */}
+            {/* RECEIPT */}
             {checkoutDone && lastReceipts.length > 0 && (
               <div className="receipt-wrap">
                 <div className="receipt-header">
@@ -786,7 +827,18 @@ function BuyerDashboardContent() {
                       <div className="receipt-row"><span className="receipt-row-label">Amount</span><span className="receipt-row-value">{r.amount.toLocaleString()} RWF</span></div>
                       <div className="receipt-row"><span className="receipt-row-label">Method</span><span className="receipt-row-value">{methodLabel[r.method] || r.method}</span></div>
                       <div className="receipt-row"><span className="receipt-row-label">Reference</span><span className="receipt-row-value">{r.gateway_ref}</span></div>
-                      <div className="tx-box"><div className="tx-label">TX Hash</div><div className="tx-value">{r.tx_hash}</div></div>
+                      <div className="tx-box">
+                        <div className="tx-label">TX Hash</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div className="tx-value">{r.tx_hash}</div>
+                          {r.tx_hash?.startsWith('0x') && (
+                            <a href={`${EXPLORER_URL}/tx/${r.tx_hash}`} target="_blank" rel="noopener noreferrer"
+                              style={{ color: 'var(--accent)', fontSize: 11, flexShrink: 0, textDecoration: 'none' }}>
+                              View ↗
+                            </a>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   ))}
                   <div className="notice" style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.15)', color: '#93c5fd', marginBottom: 16, marginTop: 8 }}>
@@ -816,13 +868,11 @@ function BuyerDashboardContent() {
                     </div>
                   ))}
                 </div>
-
                 {delivered > 0 && (
                   <div className="delivered-alert">
                     🔔 {delivered} order{delivered > 1 ? 's' : ''} awaiting your delivery confirmation
                   </div>
                 )}
-
                 <div className="order-list">
                   {orders.length === 0 ? (
                     <div className="empty">
@@ -853,7 +903,8 @@ function BuyerDashboardContent() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                               <div className="tx-value" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 }}>{order.tx_hash}</div>
                               {order.tx_hash.startsWith('0x') && !order.tx_hash.startsWith('0xSIM') && (
-                                <a href={`https://sepolia.etherscan.io/tx/${order.tx_hash}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: 12, flexShrink: 0, textDecoration: 'none' }}>View ↗</a>
+                                <a href={`${EXPLORER_URL}/tx/${order.tx_hash}`} target="_blank" rel="noopener noreferrer"
+                                  style={{ color: 'var(--accent)', fontSize: 12, flexShrink: 0, textDecoration: 'none' }}>View ↗</a>
                               )}
                             </div>
                           </div>
@@ -872,8 +923,8 @@ function BuyerDashboardContent() {
                           </div>
                         )}
                         {order.status === 'completed' && <div className="notice" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.15)', color: '#6ee7b7' }}>✅ Delivered — payment released to seller</div>}
-                        {order.status === 'refunded' && <div className="notice" style={{ background: 'rgba(249,115,22,0.07)', border: '1px solid rgba(249,115,22,0.15)', color: '#fdba74' }}>💰 Refunded by admin</div>}
-                        {order.status === 'disputed' && <div className="notice" style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.15)', color: '#fca5a5' }}>⚠️ Dispute under review by admin</div>}
+                        {order.status === 'refunded'  && <div className="notice" style={{ background: 'rgba(249,115,22,0.07)', border: '1px solid rgba(249,115,22,0.15)', color: '#fdba74' }}>💰 Refunded by admin</div>}
+                        {order.status === 'disputed'  && <div className="notice" style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.15)', color: '#fca5a5' }}>⚠️ Dispute under review by admin</div>}
                       </div>
                     );
                   })}
@@ -958,7 +1009,7 @@ function BuyerDashboardContent() {
 
             {cart.length === 0 ? (
               <div className="cart-empty">
-                <div className="cart-empty-icon">🛒</div>
+                <div style={{ fontSize: 40 }}>🛒</div>
                 <div style={{ fontSize: 14, fontWeight: 600 }}>Your cart is empty</div>
                 <div style={{ fontSize: 12 }}>Add products from the shop</div>
               </div>
@@ -991,58 +1042,76 @@ function BuyerDashboardContent() {
                   <span className="cart-total-value">{cartTotal.toLocaleString()} RWF</span>
                 </div>
 
-                <select className="pay-select" value={payMethod} onChange={e => setPayMethod(e.target.value)}>
-                  <option value="mobile_money">📱 MTN Mobile Money</option>
-                  <option value="bank_transfer">🏦 Bank Transfer</option>
-                  <option value="crypto">🦊 Ethereum via MetaMask (Sepolia)</option>
-                </select>
+                {/* ── Payment method tabs (MoMo | Crypto only) ── */}
+                <div className="pay-tabs">
+                  <button
+                    className={`pay-tab ${payMethod === 'mobile_money' ? 'active-momo' : ''}`}
+                    onClick={() => setPayMethod('mobile_money')}>
+                    📱 MTN MoMo
+                  </button>
+                  <button
+                    className={`pay-tab ${payMethod === 'crypto' ? 'active-crypto' : ''}`}
+                    onClick={() => setPayMethod('crypto')}>
+                    🦊 Crypto (ETH)
+                  </button>
+                </div>
 
+                {/* ── MoMo inputs ── */}
                 {payMethod === "mobile_money" && (
                   <div style={{ marginBottom: 12 }}>
                     <input
-                      className="pay-select"
-                      style={{ marginBottom: 8 }}
+                      style={{ width: '100%', background: 'var(--deep)', border: '1px solid var(--border)', borderRadius: 9, padding: '10px 14px', color: 'var(--text)', fontFamily: 'DM Sans, sans-serif', fontSize: 13, outline: 'none', marginBottom: 8 }}
                       placeholder="MoMo phone e.g. 25078xxxxxxx"
                       value={momoPhone}
-                      onChange={(e) => setMomoPhone(e.target.value)}
+                      onChange={e => setMomoPhone(e.target.value)}
                     />
-
-                    {momoRef && (
-                      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
-                        Ref: {momoRef}
-                      </div>
-                    )}
-
-                    {momoStatus && (
-                      <div style={{ fontSize: 12, color: "#93c5fd", marginBottom: 6 }}>
-                        {momoStatus}
-                      </div>
-                    )}
+                    {momoRef    && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>Ref: {momoRef}</div>}
+                    {momoStatus && <div style={{ fontSize: 12, color: '#93c5fd',     marginBottom: 6 }}>{momoStatus}</div>}
                   </div>
                 )}
 
+                {/* ── Crypto / MetaMask info ── */}
                 {payMethod === "crypto" && (
-                  <div style={{ marginBottom: 12, fontSize: 12, color: hasMetaMask ? "#93c5fd" : "#fca5a5" }}>
-                    {hasMetaMask
-                      ? "You will be redirected to MetaMask to approve the ETH payment."
-                      : "MetaMask is not detected. Install/enable MetaMask to pay with Ethereum."}
+                  <div style={{ marginBottom: 12 }}>
+                    {/* MetaMask detection */}
+                    <div style={{ fontSize: 12, color: hasMetaMask ? '#c4b5fd' : '#fca5a5', marginBottom: 8, padding: '8px 12px', background: hasMetaMask ? 'rgba(139,92,246,0.07)' : 'rgba(239,68,68,0.07)', border: `1px solid ${hasMetaMask ? 'rgba(139,92,246,0.2)' : 'rgba(239,68,68,0.2)'}`, borderRadius: 8 }}>
+                      {hasMetaMask
+                        ? "🦊 MetaMask detected. You'll approve each escrow transaction in MetaMask."
+                        : "⚠️ MetaMask not detected. Install the MetaMask browser extension to pay with ETH."}
+                    </div>
+
+                    {/* Contract info */}
+                    {hasMetaMask && CONTRACT_ADDRESS && (
+                      <div style={{ fontSize: 11, color: 'var(--muted)', padding: '6px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: 7, fontFamily: 'monospace' }}>
+                        Contract: {CONTRACT_ADDRESS.slice(0,10)}…{CONTRACT_ADDRESS.slice(-8)}
+                        <a href={`${EXPLORER_URL}/address/${CONTRACT_ADDRESS}`} target="_blank" rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', marginLeft: 8, textDecoration: 'none', fontSize: 11 }}>View ↗</a>
+                      </div>
+                    )}
+
+                    {/* Live progress when transacting */}
+                    {cryptoStep !== 'idle' && cryptoProgress && (
+                      <div className="crypto-progress" style={{ marginTop: 8 }}>
+                        <div className="crypto-spinner" />
+                        {cryptoProgress}
+                      </div>
+                    )}
                   </div>
                 )}
 
+                {/* ── Checkout button ── */}
                 <button
                   className="btn btn-blue btn-lg"
                   onClick={handleCheckout}
                   disabled={
-                    checkingOut ||
-                    momoPaying ||
-                    (payMethod === "crypto" && !hasMetaMask) ||
+                    checkingOut || momoPaying ||
+                    (payMethod === "crypto"       && !hasMetaMask) ||
                     (payMethod === "mobile_money" && momoPhone.trim().length < 10)
-                  }
-                >
+                  }>
                   {momoPaying
                     ? "📱 Waiting for MoMo approval…"
                     : checkingOut
-                      ? `⏳ Processing ${cart.length} order${cart.length > 1 ? "s" : ""}…`
+                      ? cryptoButtonLabel()
                       : `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`}
                 </button>
               </div>

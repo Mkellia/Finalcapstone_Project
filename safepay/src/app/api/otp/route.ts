@@ -79,13 +79,11 @@ export async function POST(req: NextRequest) {
       const otp     = generateOTP(); // plain 6-digit string e.g. "482910"
       const expires = new Date(Date.now() + 5 * 60 * 1000);
 
-      // Store the ACTUAL OTP code (not a secret) so we can compare directly
       await query(
         `UPDATE orders SET otp_code = $1, otp_expires_at = $2 WHERE id = $3`,
         [otp, expires.toISOString(), order_id]
       );
 
-      // Get buyer info for email
       const orderRes = await query(
         `SELECT o.item_name, u.email, u.name
          FROM orders o
@@ -102,7 +100,12 @@ export async function POST(req: NextRequest) {
 
       if (toEmail) {
         try {
-          await sendOtpEmail(toEmail, order?.name || session.user.name || "Buyer", otp, order?.item_name || "your item");
+          await sendOtpEmail(
+            toEmail,
+            order?.name || session.user.name || "Buyer",
+            otp,
+            order?.item_name || "your item"
+          );
           email_sent = true;
           console.log(`✅ OTP ${otp} sent to ${toEmail}`);
         } catch (emailErr: unknown) {
@@ -115,10 +118,10 @@ export async function POST(req: NextRequest) {
       }
 
       return NextResponse.json({
-        otp,                          // always return so UI can show it
+        otp,
         expires: expires.toISOString(),
         email_sent,
-        email_to: toEmail,
+        email_to:    toEmail,
         email_error,
       });
 
@@ -128,8 +131,8 @@ export async function POST(req: NextRequest) {
     }
   }
 
- // ── VERIFY ────────────────────────────────────────────────
- if (action === 'verify') {
+  // ── VERIFY ────────────────────────────────────────────────
+  if (action === 'verify') {
     try {
       const { otp_token } = body;
 
@@ -137,9 +140,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Missing OTP' }, { status: 400 });
       }
 
-      // Do expiry check in SQL using DB time — avoids timezone mismatch
       const result = await query(
-        `SELECT 
+        `SELECT
            otp_code,
            otp_expires_at,
            NOW() as db_now,
@@ -158,34 +160,35 @@ export async function POST(req: NextRequest) {
         still_valid: order?.still_valid,
       });
 
-      if (!order) {
-        return NextResponse.json({ error: 'Order not found' }, { status: 404 });
-      }
-
-      if (!order.otp_code) {
-        return NextResponse.json({ error: 'No OTP generated for this order' }, { status: 400 });
-      }
-
-      if (!order.still_valid) {
-        return NextResponse.json(
-          { error: 'OTP has expired. Please generate a new one.' },
-          { status: 400 }
-        );
-      }
+      if (!order)             return NextResponse.json({ error: 'Order not found' },                    { status: 404 });
+      if (!order.otp_code)    return NextResponse.json({ error: 'No OTP generated for this order' },    { status: 400 });
+      if (!order.still_valid) return NextResponse.json({ error: 'OTP has expired. Generate a new one.' }, { status: 400 });
 
       if (otp_token.trim() !== order.otp_code.trim()) {
         return NextResponse.json({ error: 'Invalid OTP code' }, { status: 400 });
       }
 
+      // ── Check payment method ─────────────────────────────
       const paymentRes = await query(
         `SELECT method FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
         [order_id]
       );
       const paymentMethod = paymentRes.rows[0]?.method as string | undefined;
 
+      // ── On-chain release for crypto orders ───────────────
+      // FIX: capture txHash so we can persist it to payments table
+      let txHash: string | null = null;
+
       if (paymentMethod === "crypto") {
         try {
-          await releasePayment(order_id);
+          // releasePayment() from blockchain.ts:
+          //   ✅ verifies escrow is FUNDED (not already released/refunded)
+          //   ✅ simulates call to catch contract reverts before spending gas
+          //   ✅ calls releasePayment(orderId) on the SafePayEscrow contract
+          //   ✅ waits for on-chain confirmation (transaction receipt)
+          //   ✅ returns the txHash string
+          txHash = await releasePayment(order_id);
+          console.log(`✅ On-chain release tx: ${txHash}`);
         } catch (chainErr) {
           console.error("Release payment on chain failed:", chainErr);
           return NextResponse.json(
@@ -195,16 +198,33 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      // ── Update DB ─────────────────────────────────────────
+      // FIX: also clear otp_expires_at and persist tx_hash
       await query(
-        `UPDATE orders SET status = 'completed', otp_code = null, updated_at = NOW() WHERE id = $1`,
-        [order_id]
-      );
-      await query(
-        `UPDATE payments SET status = 'released' WHERE order_id = $1`,
+        `UPDATE orders
+            SET status         = 'completed',
+                otp_code       = null,
+                otp_expires_at = null,
+                updated_at     = NOW()
+          WHERE id = $1`,
         [order_id]
       );
 
-      return NextResponse.json({ success: true, message: 'Delivery confirmed. Payment released.' });
+      await query(
+        `UPDATE payments
+            SET status  = 'released',
+                tx_hash = COALESCE($1, tx_hash)
+          WHERE order_id = $2`,
+        [txHash, order_id]
+      );
+
+      return NextResponse.json({
+        success: true,
+        tx_hash: txHash,
+        message: txHash
+          ? `Delivery confirmed. Payment released on-chain ✅`
+          : 'Delivery confirmed. Payment released.',
+      });
 
     } catch (err) {
       console.error('Verify error:', err);
