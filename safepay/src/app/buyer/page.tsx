@@ -7,7 +7,7 @@ import { toaster } from "@/components/ui/toaster";
 import { Order, Product } from "@/types";
 
 // ── Import the deployed contract ABI ─────────────────────────────────────────
-import { CREATE_ESCROW_ABI } from "../../../contracts/Safepayescrow.abi";
+import { CREATE_ESCROW_ABI } from "../../lib/SafePayEscrow.abi";
 
 const CATEGORIES = ['All', 'Shoes', 'Bags', 'Electronics', 'Fashion', 'Accessories', 'Beauty'];
 
