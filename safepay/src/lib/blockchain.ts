@@ -28,14 +28,13 @@ export const EscrowStatus = {
 export type EscrowStatusType = (typeof EscrowStatus)[keyof typeof EscrowStatus];
 
 // ─── Config (all values come from env) ───────────────────────────────────────
-const CONTRACT_ADDRESS  = process.env.ESCROW_CONTRACT_ADDRESS  as `0x${string}`;
-const OWNER_PRIVATE_KEY = (process.env.ESCROW_OWNER_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as `0x${string}`;
-const RPC_URL           = process.env.CHAIN_RPC_URL || process.env.SEPOLIA_RPC_URL;
+const rawContractAddress = process.env.ESCROW_CONTRACT_ADDRESS || process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS;
+const rawOwnerKey = process.env.ESCROW_OWNER_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY;
+const rawRpcUrl = process.env.CHAIN_RPC_URL || process.env.SEPOLIA_RPC_URL;
+const CONTRACT_ADDRESS = rawContractAddress?.trim() as `0x${string}` | undefined;
+const OWNER_PRIVATE_KEY = rawOwnerKey?.trim();
+const RPC_URL = rawRpcUrl?.trim();
 const CHAIN_ID          = Number(process.env.CHAIN_ID ?? "11155111");
-
-if (!CONTRACT_ADDRESS)  throw new Error("Missing env: ESCROW_CONTRACT_ADDRESS");
-if (!OWNER_PRIVATE_KEY) throw new Error("Missing env: ESCROW_OWNER_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY)");
-if (!RPC_URL)           throw new Error("Missing env: CHAIN_RPC_URL");
 
 function resolveChain(chainId: number) {
   switch (chainId) {
@@ -50,19 +49,43 @@ function resolveChain(chainId: number) {
 }
 const CHAIN = resolveChain(CHAIN_ID);
 
+function requireConfig() {
+  if (!CONTRACT_ADDRESS) throw new Error("Missing env: ESCROW_CONTRACT_ADDRESS (or NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS)");
+  if (!OWNER_PRIVATE_KEY) throw new Error("Missing env: ESCROW_OWNER_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY)");
+  if (!RPC_URL) throw new Error("Missing env: CHAIN_RPC_URL");
+}
+
+function getContractAddress(): `0x${string}` {
+  requireConfig();
+  return CONTRACT_ADDRESS as `0x${string}`;
+}
+
+function getOwnerPrivateKey(): `0x${string}` {
+  if (!OWNER_PRIVATE_KEY) {
+    throw new Error("Missing env: ESCROW_OWNER_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY)");
+  }
+  const normalized = OWNER_PRIVATE_KEY.startsWith("0x")
+    ? OWNER_PRIVATE_KEY
+    : `0x${OWNER_PRIVATE_KEY}`;
+  return normalized as `0x${string}`;
+}
+
 // ─── Viem client factory ──────────────────────────────────────────────────────
 function getClients() {
-  const account = privateKeyToAccount(OWNER_PRIVATE_KEY);
+  requireConfig();
+  const ownerKey = getOwnerPrivateKey();
+  const rpcUrl = RPC_URL as string;
+  const account = privateKeyToAccount(ownerKey);
 
   const publicClient = createPublicClient({
     chain: CHAIN,
-    transport: http(RPC_URL),
+    transport: http(rpcUrl),
   });
 
   const walletClient = createWalletClient({
     account,
     chain: CHAIN,
-    transport: http(RPC_URL),
+    transport: http(rpcUrl),
   });
 
   return { publicClient, walletClient, account };
@@ -71,9 +94,10 @@ function getClients() {
 // ─── Helper: read escrow state ────────────────────────────────────────────────
 export async function getEscrow(orderId: string) {
   const { publicClient } = getClients();
+  const contractAddress = getContractAddress();
 
   const data = await publicClient.readContract({
-    address:      CONTRACT_ADDRESS,
+    address:      contractAddress,
     abi:          ESCROW_ABI,
     functionName: "getEscrow",
     args:         [orderId],
@@ -91,6 +115,7 @@ export async function getEscrow(orderId: string) {
 // ─── Helper: release payment to seller (called after OTP confirmation) ────────
 export async function releasePayment(orderId: string): Promise<string> {
   const { publicClient, walletClient, account } = getClients();
+  const contractAddress = getContractAddress();
 
   // Verify state before sending tx
   const escrow = await getEscrow(orderId);
@@ -100,7 +125,7 @@ export async function releasePayment(orderId: string): Promise<string> {
 
   // Simulate to catch revert reasons early (saves gas on failure)
   const { request } = await publicClient.simulateContract({
-    address:      CONTRACT_ADDRESS,
+    address:      contractAddress,
     abi:          ESCROW_ABI,
     functionName: "releasePayment",
     args:         [orderId],
@@ -116,6 +141,7 @@ export async function releasePayment(orderId: string): Promise<string> {
 // ─── Helper: refund buyer (called by admin on dispute resolution) ─────────────
 export async function refundBuyer(orderId: string): Promise<string> {
   const { publicClient, walletClient, account } = getClients();
+  const contractAddress = getContractAddress();
 
   // Guard: only call if still FUNDED
   const escrow = await getEscrow(orderId);
@@ -125,7 +151,7 @@ export async function refundBuyer(orderId: string): Promise<string> {
 
   // Simulate first
   const { request } = await publicClient.simulateContract({
-    address:      CONTRACT_ADDRESS,
+    address:      contractAddress,
     abi:          ESCROW_ABI,
     functionName: "refundBuyer",
     args:         [orderId],
@@ -149,11 +175,12 @@ export async function createEscrow(
   }
 
   const { publicClient, walletClient, account } = getClients();
+  const contractAddress = getContractAddress();
   const amount = parseEther(amountEth);
   const sig = await signCreateEscrow(orderId, seller as `0x${string}`, amount);
 
   const { request } = await publicClient.simulateContract({
-    address: CONTRACT_ADDRESS,
+    address: contractAddress,
     abi: ESCROW_ABI,
     functionName: "createEscrow",
     args: [orderId, seller as `0x${string}`, sig],
@@ -172,7 +199,7 @@ export async function signCreateEscrow(
   seller:  `0x${string}`,
   amount:  bigint
 ): Promise<`0x${string}`> {
-  const { walletClient } = getClients();
+  const account = privateKeyToAccount(getOwnerPrivateKey());
 
   // Must match the hash in the contract:
   // keccak256(abi.encodePacked(orderId, seller, msg.value))
@@ -183,6 +210,6 @@ export async function signCreateEscrow(
   );
 
   // Sign with Ethereum prefix (\x19Ethereum Signed Message:\n32)
-  const sig = await walletClient.signMessage({ message: { raw: toBytes(hash) } });
+  const sig = await account.signMessage({ message: { raw: toBytes(hash) } });
   return sig;
 }

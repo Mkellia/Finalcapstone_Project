@@ -68,6 +68,8 @@ function BuyerDashboardContent() {
 
   // MetaMask
   const [hasMetaMask, setHasMetaMask]       = useState(false);
+  const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
+  const [connectingMM, setConnectingMM]       = useState(false);
   const [cryptoStep, setCryptoStep]         = useState<'idle' | 'signing' | 'waiting' | 'done'>('idle');
   const [cryptoProgress, setCryptoProgress] = useState('');
 
@@ -98,13 +100,43 @@ function BuyerDashboardContent() {
     setOrders(data.orders || []);
   }
 
+  async function connectMetaMask() {
+    const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
+    if (!ethereum) return;
+    setConnectingMM(true);
+    try {
+      const accounts = await ethereum.request({ method: 'eth_requestAccounts' }) as string[];
+      if (accounts[0]) {
+        setConnectedWallet(accounts[0]);
+        toaster.create({
+          title: `🦊 Connected: ${accounts[0].slice(0,8)}…${accounts[0].slice(-6)}`,
+          type: 'success',
+          duration: 3000,
+        });
+      }
+    } catch {
+      // user rejected: keep silent
+    } finally {
+      setConnectingMM(false);
+    }
+  }
+
   useEffect(() => { fetchProducts(); fetchOrders(); }, []);
   useEffect(() => {
     const interval = setInterval(fetchOrders, 10000);
     return () => clearInterval(interval);
   }, []);
   useEffect(() => {
-    setHasMetaMask(Boolean((window as unknown as { ethereum?: unknown }).ethereum));
+    const eth = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
+    setHasMetaMask(Boolean(eth));
+    if (eth) {
+      eth.request({ method: 'eth_accounts' })
+        .then((accounts) => {
+          const accs = accounts as string[];
+          if (accs.length > 0) setConnectedWallet(accs[0]);
+        })
+        .catch(() => {});
+    }
   }, []);
 
   // ── cart helpers ─────────────────────────────────────
@@ -260,6 +292,7 @@ function BuyerDashboardContent() {
 
         const signer = await provider.getSigner();
         const buyerAddress = await signer.getAddress();
+        setConnectedWallet(buyerAddress);
 
         // 3. Build the contract interface using the deployed ABI
         //    CREATE_ESCROW_ABI is imported from lib/SafePayEscrow.abi.ts
@@ -730,6 +763,28 @@ function BuyerDashboardContent() {
               </div>
             )}
           </nav>
+          {hasMetaMask && (
+            connectedWallet ? (
+              <div style={{ margin: '0 12px 8px', padding: '8px 12px', borderRadius: 9, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px var(--green)', flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 10, color: 'rgba(110,231,183,0.6)', marginBottom: 1 }}>MetaMask</div>
+                  <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#6ee7b7' }}>
+                    {connectedWallet.slice(0,8)}…{connectedWallet.slice(-6)}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div onClick={connectMetaMask} style={{ margin: '0 12px 8px', padding: '8px 12px', borderRadius: 9, background: 'rgba(249,115,22,0.07)', border: '1px solid rgba(249,115,22,0.2)', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, color: 'rgba(253,186,116,0.6)', marginBottom: 1 }}>MetaMask</div>
+                  <div style={{ fontSize: 11, color: '#fdba74' }}>{connectingMM ? 'Connecting…' : 'Click to connect'}</div>
+                </div>
+                <span style={{ fontSize: 14 }}>🦊</span>
+              </div>
+            )
+          )}
           <div className="sidebar-foot">
             <button className="sign-out" onClick={() => signOut({ callbackUrl: '/' })}>
               <span>🚪</span> Sign Out
@@ -1073,23 +1128,37 @@ function BuyerDashboardContent() {
                 {/* ── Crypto / MetaMask info ── */}
                 {payMethod === "crypto" && (
                   <div style={{ marginBottom: 12 }}>
-                    {/* MetaMask detection */}
-                    <div style={{ fontSize: 12, color: hasMetaMask ? '#c4b5fd' : '#fca5a5', marginBottom: 8, padding: '8px 12px', background: hasMetaMask ? 'rgba(139,92,246,0.07)' : 'rgba(239,68,68,0.07)', border: `1px solid ${hasMetaMask ? 'rgba(139,92,246,0.2)' : 'rgba(239,68,68,0.2)'}`, borderRadius: 8 }}>
-                      {hasMetaMask
-                        ? "🦊 MetaMask detected. You'll approve each escrow transaction in MetaMask."
-                        : "⚠️ MetaMask not detected. Install the MetaMask browser extension to pay with ETH."}
-                    </div>
+                    {hasMetaMask ? (
+                      connectedWallet ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 9, marginBottom: 8 }}>
+                          <span>🦊</span>
+                          <div style={{ fontFamily: 'monospace', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#6ee7b7' }}>
+                            {connectedWallet.slice(0,10)}…{connectedWallet.slice(-8)}
+                          </div>
+                          <span style={{ fontSize: 10, background: 'rgba(16,185,129,0.2)', color: 'var(--green)', padding: '2px 7px', borderRadius: 100 }}>Connected</span>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={connectMetaMask}
+                          disabled={connectingMM}
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: '9px', borderRadius: 9, background: 'linear-gradient(135deg,#f97316,#ea580c)', color: '#fff', fontFamily: 'DM Sans, sans-serif', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none', marginBottom: 8, opacity: connectingMM ? 0.5 : 1 }}>
+                          {connectingMM ? '⏳ Connecting…' : '🦊 Connect MetaMask'}
+                        </button>
+                      )
+                    ) : (
+                      <div style={{ fontSize: 12, color: '#fca5a5', marginBottom: 8, padding: '8px 12px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8 }}>
+                        ⚠️ MetaMask not detected. Install the MetaMask browser extension to pay with ETH.
+                      </div>
+                    )}
 
-                    {/* Contract info */}
-                    {hasMetaMask && CONTRACT_ADDRESS && (
-                      <div style={{ fontSize: 11, color: 'var(--muted)', padding: '6px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: 7, fontFamily: 'monospace' }}>
+                    {hasMetaMask && connectedWallet && CONTRACT_ADDRESS && (
+                      <div style={{ fontSize: 11, color: 'var(--muted)', padding: '6px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: 7, fontFamily: 'monospace', marginBottom: 8 }}>
                         Contract: {CONTRACT_ADDRESS.slice(0,10)}…{CONTRACT_ADDRESS.slice(-8)}
                         <a href={`${EXPLORER_URL}/address/${CONTRACT_ADDRESS}`} target="_blank" rel="noopener noreferrer"
                           style={{ color: 'var(--accent)', marginLeft: 8, textDecoration: 'none', fontSize: 11 }}>View ↗</a>
                       </div>
                     )}
 
-                    {/* Live progress when transacting */}
                     {cryptoStep !== 'idle' && cryptoProgress && (
                       <div className="crypto-progress" style={{ marginTop: 8 }}>
                         <div className="crypto-spinner" />
@@ -1105,7 +1174,7 @@ function BuyerDashboardContent() {
                   onClick={handleCheckout}
                   disabled={
                     checkingOut || momoPaying ||
-                    (payMethod === "crypto"       && !hasMetaMask) ||
+                    (payMethod === "crypto"       && (!hasMetaMask || !connectedWallet)) ||
                     (payMethod === "mobile_money" && momoPhone.trim().length < 10)
                   }>
                   {momoPaying

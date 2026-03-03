@@ -33,7 +33,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       signature,
-      contractAddress: process.env.ESCROW_CONTRACT_ADDRESS,
+      contractAddress:
+        process.env.ESCROW_CONTRACT_ADDRESS ||
+        process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS,
       chainId: Number(process.env.CHAIN_ID ?? "11155111"),
     });
   } catch (err: unknown) {
