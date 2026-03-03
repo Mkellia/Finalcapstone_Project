@@ -1,7 +1,8 @@
 import fs from "fs";
-import { ethers } from "hardhat";
+import hre from "hardhat";
 
 async function main() {
+  const { ethers } = hre;
   const [deployer] = await ethers.getSigners();
   console.log('Deploying with:', deployer.address);
   console.log('Balance:', ethers.formatEther(await deployer.provider.getBalance(deployer.address)), 'ETH');

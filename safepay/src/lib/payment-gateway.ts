@@ -1,3 +1,5 @@
+import { createEscrow } from "@/lib/blockchain";
+
 export type PaymentMethod = 'mobile_money' | 'bank_transfer' | 'crypto';
 
 export interface PaymentResult {
@@ -55,18 +57,49 @@ async function simulateFiatPayment(
 
 async function simulateCryptoEscrow(
   orderId: string,
-  amount:  number
+  amount:  number,
+  sellerWalletAddress?: string,
 ): Promise<PaymentResult> {
-  await new Promise(r => setTimeout(r, 3000));
+  if (!sellerWalletAddress) {
+    return {
+      success: false,
+      tx_hash: '',
+      method: 'crypto',
+      amount,
+      gateway_ref: '',
+      message: 'Seller wallet address is missing. Ask seller to save wallet before crypto checkout.',
+    };
+  }
 
-  const tx_hash = fakeTxHash();
+  const rwfPerEth = Number(process.env.SEPOLIA_RWF_PER_ETH || '4000000');
+  const minEscrowEth = Number(process.env.SEPOLIA_MIN_ESCROW_ETH || '0.00001');
+  const amountEth = Math.max(amount / rwfPerEth, minEscrowEth);
+
+  let tx_hash = '';
+  try {
+    tx_hash = await createEscrow(orderId, sellerWalletAddress, amountEth.toFixed(8));
+  } catch (err: unknown) {
+    const msg =
+      typeof err === 'object' && err !== null && 'message' in err
+        ? String((err as { message?: string }).message)
+        : 'Unknown blockchain error';
+    return {
+      success: false,
+      tx_hash: '',
+      method: 'crypto',
+      amount,
+      gateway_ref: '',
+      message: `Sepolia escrow failed: ${msg}`,
+    };
+  }
+
   return {
     success:     true,
     tx_hash,
     method:      'crypto',
     amount,
     gateway_ref: tx_hash,
-    message:     `ETH locked in escrow on Sepolia testnet`,
+    message:     `ETH locked in escrow on Sepolia testnet (${amountEth.toFixed(6)} ETH)`,
   };
 }
 
@@ -74,9 +107,10 @@ export async function processPayment(
   orderId: string,
   amount:  number,
   method:  PaymentMethod,
+  sellerWalletAddress?: string,
 ): Promise<PaymentResult> {
   if (method === 'crypto') {
-    return simulateCryptoEscrow(orderId, amount);
+    return simulateCryptoEscrow(orderId, amount, sellerWalletAddress);
   }
   return simulateFiatPayment(amount, method);
 }

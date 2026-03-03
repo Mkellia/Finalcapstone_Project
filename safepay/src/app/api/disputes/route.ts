@@ -10,11 +10,12 @@ export async function GET() {
   }
 
   const result = await query(
-    `SELECT d.*, o.item_name, o.amount, b.name as buyer_name, s.name as seller_name
+    `SELECT d.*, o.item_name, o.amount, b.name as buyer_name, s.name as seller_name, p.method as payment_method
      FROM disputes d
      JOIN orders o ON o.id = d.order_id
      JOIN users b ON b.id = o.buyer_id
      JOIN users s ON s.id = o.seller_id
+     LEFT JOIN payments p ON p.order_id = o.id
      ORDER BY d.created_at DESC`
   );
 

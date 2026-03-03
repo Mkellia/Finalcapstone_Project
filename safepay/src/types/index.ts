@@ -55,6 +55,7 @@ export interface Product {
   id: string;
   seller_id: string;
   seller_name: string;
+  seller_wallet_address?: string;
   name: string;
   description: string;
   price: number;

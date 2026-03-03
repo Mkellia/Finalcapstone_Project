@@ -70,6 +70,9 @@ export default function AdminUsersPage() {
     if (res.ok) {
       toaster.create({ title: 'User deleted', type: 'info', duration: 2000 });
       fetchUsers();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toaster.create({ title: data.error || 'Failed to delete user', type: 'error', duration: 3000 });
     }
   }
 
@@ -87,44 +90,47 @@ export default function AdminUsersPage() {
               <Heading size="lg">User Management 👥</Heading>
               <Text color="gray.500">Create and manage platform users</Text>
             </Box>
-            <DialogRoot open={open} onOpenChange={e => setOpen(e.open)}>
-              <Button colorPalette="blue" onClick={() => setOpen(true)}>+ Add User</Button>
-              <DialogContent borderRadius="xl">
-                <DialogHeader>
-                  <DialogTitle>Create New User</DialogTitle>
-                </DialogHeader>
-                <DialogCloseTrigger />
-                <DialogBody pb={6}>
-                  <VStack gap={4}>
-                    <Field.Root>
-                      <Field.Label>Full Name</Field.Label>
-                      <Input value={form.name} onChange={set('name')} placeholder="John Doe" />
-                    </Field.Root>
-                    <Field.Root>
-                      <Field.Label>Email</Field.Label>
-                      <Input type="email" value={form.email} onChange={set('email')} placeholder="john@example.com" />
-                    </Field.Root>
-                    <Field.Root>
-                      <Field.Label>Password</Field.Label>
-                      <Input type="password" value={form.password} onChange={set('password')} placeholder="••••••••" />
-                    </Field.Root>
-                    <Field.Root>
-                      <Field.Label>Role</Field.Label>
-                      <select value={form.role} onChange={set('role')}
-                        style={{ width:'100%', padding:'8px 12px', borderRadius:'6px',
-                          border:'1px solid #E2E8F0', fontSize:'14px', background:'white' }}>
-                        <option value="buyer">Buyer</option>
-                        <option value="seller">Seller</option>
-                        <option value="admin">Admin</option>
-                      </select>
-                    </Field.Root>
-                    <Button w="full" colorPalette="blue" onClick={handleCreate} loading={loading}>
-                      Create User
-                    </Button>
-                  </VStack>
-                </DialogBody>
-              </DialogContent>
-            </DialogRoot>
+            <HStack>
+              <Button variant="outline" onClick={fetchUsers}>Refresh</Button>
+              <DialogRoot open={open} onOpenChange={e => setOpen(e.open)}>
+                <Button colorPalette="blue" onClick={() => setOpen(true)}>+ Add User</Button>
+                <DialogContent borderRadius="xl">
+                  <DialogHeader>
+                    <DialogTitle>Create New User</DialogTitle>
+                  </DialogHeader>
+                  <DialogCloseTrigger />
+                  <DialogBody pb={6}>
+                    <VStack gap={4}>
+                      <Field.Root>
+                        <Field.Label>Full Name</Field.Label>
+                        <Input value={form.name} onChange={set('name')} placeholder="John Doe" />
+                      </Field.Root>
+                      <Field.Root>
+                        <Field.Label>Email</Field.Label>
+                        <Input type="email" value={form.email} onChange={set('email')} placeholder="john@example.com" />
+                      </Field.Root>
+                      <Field.Root>
+                        <Field.Label>Password</Field.Label>
+                        <Input type="password" value={form.password} onChange={set('password')} placeholder="••••••••" />
+                      </Field.Root>
+                      <Field.Root>
+                        <Field.Label>Role</Field.Label>
+                        <select value={form.role} onChange={set('role')}
+                          style={{ width:'100%', padding:'8px 12px', borderRadius:'6px',
+                            border:'1px solid #E2E8F0', fontSize:'14px', background:'white' }}>
+                          <option value="buyer">Buyer</option>
+                          <option value="seller">Seller</option>
+                          <option value="admin">Admin</option>
+                        </select>
+                      </Field.Root>
+                      <Button w="full" colorPalette="blue" onClick={handleCreate} loading={loading}>
+                        Create User
+                      </Button>
+                    </VStack>
+                  </DialogBody>
+                </DialogContent>
+              </DialogRoot>
+            </HStack>
           </HStack>
 
           <Grid templateColumns="repeat(3, 1fr)" gap={4} w="full">

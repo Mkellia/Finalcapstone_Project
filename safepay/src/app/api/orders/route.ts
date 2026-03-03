@@ -44,22 +44,29 @@ export async function POST(req: NextRequest) {
 
   try {
     const {
+      order_id,
       seller_id,
       item_name,
       amount,
       payment_method,
       momo_reference, // ✅ we will pass this from buyer page after SUCCESSFUL
+      crypto_tx_hash,
     } = await req.json();
 
     if (!seller_id || !item_name || !amount || !payment_method) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
     }
 
-    // Step 1 — create order as 'pending'
+    // Step 1 — create order as 'pending' (or use client-provided id for crypto flow)
     const orderResult = await query(
-      `INSERT INTO orders (buyer_id, seller_id, item_name, amount, status)
-       VALUES ($1, $2, $3, $4, 'pending') RETURNING *`,
-      [session.user.id, seller_id, item_name, amount]
+      payment_method === "crypto" && order_id
+        ? `INSERT INTO orders (id, buyer_id, seller_id, item_name, amount, status)
+           VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *`
+        : `INSERT INTO orders (buyer_id, seller_id, item_name, amount, status)
+           VALUES ($1, $2, $3, $4, 'pending') RETURNING *`,
+      payment_method === "crypto" && order_id
+        ? [order_id, session.user.id, seller_id, item_name, amount]
+        : [session.user.id, seller_id, item_name, amount]
     );
 
     const order = orderResult.rows[0];
@@ -97,6 +104,42 @@ export async function POST(req: NextRequest) {
             gateway_ref: momo_reference,
             message: "MoMo payment confirmed (client verified)",
             tx_hash: `MOMO:${momo_reference}`,
+            method: payment_method,
+          },
+        },
+        { status: 201 }
+      );
+    }
+
+    // ✅ If Crypto: on-chain MetaMask payment happened on client already.
+    if (payment_method === "crypto") {
+      if (!crypto_tx_hash) {
+        await query(`DELETE FROM orders WHERE id = $1`, [order.id]);
+        return NextResponse.json(
+          { error: "Missing crypto_tx_hash. Pay with MetaMask first." },
+          { status: 400 }
+        );
+      }
+
+      await query(
+        `UPDATE orders SET status = 'in_escrow', tx_hash = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [crypto_tx_hash, order.id]
+      );
+
+      await query(
+        `INSERT INTO payments (order_id, amount, method, status, tx_hash)
+         VALUES ($1, $2, $3, 'confirmed', $4)`,
+        [order.id, amount, payment_method, crypto_tx_hash]
+      );
+
+      return NextResponse.json(
+        {
+          order: { ...order, status: "in_escrow", tx_hash: crypto_tx_hash },
+          payment: {
+            gateway_ref: crypto_tx_hash,
+            message: "Crypto payment confirmed on-chain via MetaMask",
+            tx_hash: crypto_tx_hash,
             method: payment_method,
           },
         },

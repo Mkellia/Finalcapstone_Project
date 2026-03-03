@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { generateOTP } from "@/lib/otp";
+import { releasePayment } from "@/lib/blockchain";
 
 function createTransporter() {
   const secure = String(process.env.SMTP_SECURE ?? "").toLowerCase() === "true";
@@ -26,6 +27,7 @@ async function sendOtpEmail(
   itemName: string
 ) {
   const transporter = createTransporter();
+  await transporter.verify();
   await transporter.sendMail({
     from:    `"SafePay" <${process.env.EMAIL_FROM}>`,
     to,
@@ -95,12 +97,14 @@ export async function POST(req: NextRequest) {
       const order = orderRes.rows[0];
       let email_sent = false;
       let email_error: string | null = null;
+      const fallbackEmail = session.user.email ?? null;
+      const toEmail = order?.email || fallbackEmail;
 
-      if (order?.email) {
+      if (toEmail) {
         try {
-          await sendOtpEmail(order.email, order.name, otp, order.item_name);
+          await sendOtpEmail(toEmail, order?.name || session.user.name || "Buyer", otp, order?.item_name || "your item");
           email_sent = true;
-          console.log(`✅ OTP ${otp} sent to ${order.email}`);
+          console.log(`✅ OTP ${otp} sent to ${toEmail}`);
         } catch (emailErr: unknown) {
           email_error =
             typeof emailErr === "object" && emailErr !== null && "message" in emailErr
@@ -114,7 +118,7 @@ export async function POST(req: NextRequest) {
         otp,                          // always return so UI can show it
         expires: expires.toISOString(),
         email_sent,
-        email_to: order?.email ?? null,
+        email_to: toEmail,
         email_error,
       });
 
@@ -171,6 +175,24 @@ export async function POST(req: NextRequest) {
 
       if (otp_token.trim() !== order.otp_code.trim()) {
         return NextResponse.json({ error: 'Invalid OTP code' }, { status: 400 });
+      }
+
+      const paymentRes = await query(
+        `SELECT method FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [order_id]
+      );
+      const paymentMethod = paymentRes.rows[0]?.method as string | undefined;
+
+      if (paymentMethod === "crypto") {
+        try {
+          await releasePayment(order_id);
+        } catch (chainErr) {
+          console.error("Release payment on chain failed:", chainErr);
+          return NextResponse.json(
+            { error: "Delivery confirmed but failed to release on-chain payment. Try again." },
+            { status: 500 }
+          );
+        }
       }
 
       await query(

@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
     let result;
     if (category && category !== 'All') {
       result = await query(
-        `SELECT p.*, u.name as seller_name
+        `SELECT p.*, u.name as seller_name, u.wallet_address as seller_wallet_address
          FROM products p
          JOIN users u ON u.id = p.seller_id
          WHERE p.in_stock = true AND p.category = $1
@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
       );
     } else {
       result = await query(
-        `SELECT p.*, u.name as seller_name
+        `SELECT p.*, u.name as seller_name, u.wallet_address as seller_wallet_address
          FROM products p
          JOIN users u ON u.id = p.seller_id
          WHERE p.in_stock = true

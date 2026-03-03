@@ -20,6 +20,9 @@ const STATUS_STYLE: Record<string, { bg: string; text: string; dot: string }> = 
 
 type CartItem = Product & { qty: number };
 type OrderWithSeller = Order & { seller_name?: string; tx_hash?: string };
+type Eip1193Provider = {
+  request: (args: { method: string; params?: unknown[] | object }) => Promise<unknown>;
+};
 
 function BuyerDashboardContent() {
   const { data: session } = useSession();
@@ -48,6 +51,7 @@ function BuyerDashboardContent() {
   const [momoRef, setMomoRef] = useState<string | null>(null);
   const [momoStatus, setMomoStatus] = useState('');
   const [momoPaying, setMomoPaying] = useState(false);
+  const [hasMetaMask, setHasMetaMask] = useState(false);
 
   // ── otp ──────────────────────────────────────────────
   const [otpOrder, setOtpOrder]         = useState<OrderWithSeller | null>(null);
@@ -81,6 +85,9 @@ function BuyerDashboardContent() {
     const interval = setInterval(fetchOrders, 10000);
     return () => clearInterval(interval);
   }, []);
+  useEffect(() => {
+    setHasMetaMask(Boolean((window as unknown as { ethereum?: unknown }).ethereum));
+  }, []);
 
   // ── cart helpers ─────────────────────────────────────
   function addToCart(product: Product) {
@@ -111,6 +118,7 @@ function BuyerDashboardContent() {
   async function handleCheckout() {
   if (cart.length === 0) return;
   let momoReferenceForOrder: string | null = momoRef;
+  const cryptoPaidUnits: Array<{ order_id: string; item: CartItem; tx_hash: string }> = [];
 
   // ✅ If user chose MoMo: pay FIRST for the whole cart total
   if (payMethod === "mobile_money") {
@@ -178,35 +186,150 @@ function BuyerDashboardContent() {
     setMomoStatus("✅ Payment successful!");
   }
 
+  // ✅ If user chose Crypto: pay each unit in MetaMask first
+  if (payMethod === "crypto") {
+    if (!(window as Window & { ethereum?: unknown }).ethereum) {
+      toaster.create({ title: "MetaMask not detected", type: "error", duration: 4000 });
+      return;
+    }
+
+    try {
+      setCheckingOut(true);
+      toaster.create({ title: "Open MetaMask to approve payment", type: "info", duration: 3000 });
+      const { ethers } = await import("ethers");
+      const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
+      if (!ethereum) throw new Error("MetaMask provider missing");
+      const provider = new ethers.BrowserProvider(ethereum);
+      await provider.send("eth_requestAccounts", []);
+
+      const rwfPerEth = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH || "4000000");
+      const minEscrowEth = Number(process.env.NEXT_PUBLIC_SEPOLIA_MIN_ESCROW_ETH || "0.00001");
+      const contractAbi = [
+        "function createEscrow(string orderId, address seller, bytes sig) payable",
+      ];
+
+      for (const item of cart) {
+        if (!item.seller_wallet_address) {
+          throw new Error(`${item.name}: seller wallet is not configured`);
+        }
+
+        for (let q = 0; q < item.qty; q++) {
+          const amountEth = Math.max(Number(item.price) / rwfPerEth, minEscrowEth);
+          const amountWei = ethers.parseEther(amountEth.toFixed(8));
+          const orderId = `ord-${Date.now()}-${item.id.slice(0, 6)}-${q}-${Math.random().toString(16).slice(2, 8)}`;
+
+          const sigRes = await fetch("/api/payments/crypto-sign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              orderId,
+              seller: item.seller_wallet_address,
+              amountWei: amountWei.toString(),
+            }),
+          });
+          const sigData = await sigRes.json();
+          if (!sigRes.ok) {
+            throw new Error(sigData.error || `Failed to sign escrow for ${item.name}`);
+          }
+
+          const desiredChainId = Number(sigData.chainId || 11155111);
+          const currentHex = (await provider.send("eth_chainId", [])) as string;
+          const currentChainId = Number.parseInt(currentHex, 16);
+          if (currentChainId !== desiredChainId) {
+            await provider.send("wallet_switchEthereumChain", [
+              { chainId: `0x${desiredChainId.toString(16)}` },
+            ]);
+          }
+
+          const signer = await provider.getSigner();
+          const contract = new ethers.Contract(sigData.contractAddress, contractAbi, signer);
+          const tx = await contract.createEscrow(orderId, item.seller_wallet_address, sigData.signature, {
+            value: amountWei,
+          });
+          const receipt = await tx.wait();
+          const txHash = receipt?.hash || tx.hash;
+
+          cryptoPaidUnits.push({
+            order_id: orderId,
+            item,
+            tx_hash: txHash,
+          });
+        }
+      }
+    } catch (err: unknown) {
+      setCheckingOut(false);
+      const msg =
+        typeof err === "object" && err !== null && "message" in err
+          ? String((err as { message?: string }).message)
+          : "MetaMask payment failed";
+      toaster.create({ title: msg, type: "error", duration: 5000 });
+      return;
+    }
+  }
+
   // ✅ After payment success (MoMo) OR for other methods, create the orders
   setCheckingOut(true);
 
   const receipts: typeof lastReceipts = [];
   let allOk = true;
 
-  for (const item of cart) {
-    for (let q = 0; q < item.qty; q++) {
+  if (payMethod === "crypto") {
+    for (const unit of cryptoPaidUnits) {
       const res = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          seller_id: item.seller_id,
-          item_name: item.name,
-          amount: item.price,
+          order_id: unit.order_id,
+          seller_id: unit.item.seller_id,
+          item_name: unit.item.name,
+          amount: unit.item.price,
           payment_method: payMethod,
-
-          // ✅ only for MoMo orders
-          momo_reference: payMethod === "mobile_money" ? momoReferenceForOrder : undefined,
+          crypto_tx_hash: unit.tx_hash,
         }),
       });
-
       const data = await res.json();
 
       if (res.ok) {
-        receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: payMethod });
+        receipts.push({
+          item_name: unit.item.name,
+          amount: Number(unit.item.price),
+          ...data.payment,
+          method: payMethod,
+        });
       } else {
-        toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
+        toaster.create({
+          title: `❌ ${unit.item.name}: ${data.error || "failed"}`,
+          type: "error",
+          duration: 4000,
+        });
         allOk = false;
+      }
+    }
+  } else {
+    for (const item of cart) {
+      for (let q = 0; q < item.qty; q++) {
+        const res = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            seller_id: item.seller_id,
+            item_name: item.name,
+            amount: item.price,
+            payment_method: payMethod,
+
+            // ✅ only for MoMo orders
+            momo_reference: payMethod === "mobile_money" ? momoReferenceForOrder : undefined,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+          receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: payMethod });
+        } else {
+          toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
+          allOk = false;
+        }
       }
     }
   }
@@ -871,7 +994,7 @@ function BuyerDashboardContent() {
                 <select className="pay-select" value={payMethod} onChange={e => setPayMethod(e.target.value)}>
                   <option value="mobile_money">📱 MTN Mobile Money</option>
                   <option value="bank_transfer">🏦 Bank Transfer</option>
-                  <option value="crypto">⛓️ Crypto (Sepolia ETH)</option>
+                  <option value="crypto">🦊 Ethereum via MetaMask (Sepolia)</option>
                 </select>
 
                 {payMethod === "mobile_money" && (
@@ -898,12 +1021,21 @@ function BuyerDashboardContent() {
                   </div>
                 )}
 
+                {payMethod === "crypto" && (
+                  <div style={{ marginBottom: 12, fontSize: 12, color: hasMetaMask ? "#93c5fd" : "#fca5a5" }}>
+                    {hasMetaMask
+                      ? "You will be redirected to MetaMask to approve the ETH payment."
+                      : "MetaMask is not detected. Install/enable MetaMask to pay with Ethereum."}
+                  </div>
+                )}
+
                 <button
                   className="btn btn-blue btn-lg"
                   onClick={handleCheckout}
                   disabled={
                     checkingOut ||
                     momoPaying ||
+                    (payMethod === "crypto" && !hasMetaMask) ||
                     (payMethod === "mobile_money" && momoPhone.trim().length < 10)
                   }
                 >

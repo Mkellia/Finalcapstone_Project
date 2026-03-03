@@ -66,7 +66,8 @@ contract SafePayEscrow {
         require(e.status == EscrowStatus.FUNDED, "Not in funded state");
 
         e.status = EscrowStatus.RELEASED;
-        payable(e.seller).transfer(e.amount);
+        (bool ok, ) = payable(e.seller).call{value: e.amount}("");
+        require(ok, "ETH transfer to seller failed");
 
         emit PaymentReleased(orderId, e.seller, e.amount);
     }
@@ -81,7 +82,8 @@ contract SafePayEscrow {
         require(e.status == EscrowStatus.FUNDED, "Not in funded state");
 
         e.status = EscrowStatus.REFUNDED;
-        payable(e.buyer).transfer(e.amount);
+        (bool ok, ) = payable(e.buyer).call{value: e.amount}("");
+        require(ok, "ETH refund to buyer failed");
 
         emit PaymentRefunded(orderId, e.buyer, e.amount);
     }
