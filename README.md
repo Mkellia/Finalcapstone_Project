@@ -1,5 +1,5 @@
 # Safepay - a blockchain-Based Escrow Payment System for Secure E-Commerce Transactions in Rwanda
-
+---
 Rwanda's e-commerce space is growing rapidly, but trust between buyers and sellers remains a major barrier — buyers fear paying for goods they may never receive, while sellers fear delivering without guaranteed payment. SafePay addresses this by replacing trust with code. Built on the Ethereum Sepolia testnet, SafePay locks buyer funds in a smart contract at checkout and only releases them to the seller once the buyer physically confirms delivery through a one-time password (OTP). Combined with MTN Mobile Money support, it bridges traditional and blockchain payments for the Rwandan market.
 ---
 
