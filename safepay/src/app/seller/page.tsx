@@ -16,6 +16,7 @@ const STATUS_COLOR: Record<string, { bg: string; text: string; dot: string }> = 
 };
 
 type OrderWithBuyer = Order & { buyer_name?: string; tx_hash?: string };
+type Currency = "RWF" | "ETH";
 // NEW: typed MetaMask provider
 type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -23,10 +24,12 @@ type Eip1193Provider = {
 
 const CATEGORIES = ['Electronics', 'Fashion', 'Home & Garden', 'Sports', 'Books', 'Food', 'Beauty', 'Automotive', 'Art', 'Other'];
 const EMPTY_FORM = { name: '', description: '', price: '', category: 'Electronics', image_url: '', in_stock: true };
+const RWF_PER_ETH = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH || "4000000");
 
 export default function SellerDashboard() {
   const { data: session } = useSession();
   const [tab, setTab] = useState<'orders' | 'products' | 'wallet'>('orders');
+  const [displayCurrency, setDisplayCurrency] = useState<Currency>("RWF");
 
   const [orders,   setOrders]   = useState<OrderWithBuyer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -35,6 +38,8 @@ export default function SellerDashboard() {
   const [walletAddress, setWalletAddress] = useState('');
   const [savedWallet,   setSavedWallet]   = useState('');
   const [savingWallet,  setSavingWallet]  = useState(false);
+  const [sellerBalance, setSellerBalance] = useState<string | null>(null);
+  const [loadingSellerBal, setLoadingSellerBal] = useState(false);
   // NEW
   const [hasMetaMask,   setHasMetaMask]   = useState(false);
   const [connectingMM,  setConnectingMM]  = useState(false);
@@ -64,8 +69,24 @@ export default function SellerDashboard() {
   async function fetchWallet() {
     const res  = await fetch('/api/sellers/wallet');
     const data = await res.json();
-    setWalletAddress(data.wallet_address || '');
-    setSavedWallet(data.wallet_address || '');
+    const savedWalletAddress = data.wallet_address || '';
+    setWalletAddress(savedWalletAddress);
+    setSavedWallet(savedWalletAddress);
+    if (savedWalletAddress) fetchSellerBalance(savedWalletAddress);
+  }
+
+  async function fetchSellerBalance(address: string) {
+    setLoadingSellerBal(true);
+    try {
+      const res = await fetch(`/api/wallet-balance?address=${address}`);
+      const data = await res.json();
+      if (res.ok) setSellerBalance(data.balance);
+      else setSellerBalance(null);
+    } catch {
+      setSellerBalance(null);
+    } finally {
+      setLoadingSellerBal(false);
+    }
   }
 
   useEffect(() => { fetchOrders(); }, []);
@@ -154,6 +175,7 @@ export default function SellerDashboard() {
     setSavingWallet(false);
     if (res.ok) {
       setSavedWallet(walletAddress);
+      fetchSellerBalance(walletAddress);
       toaster.create({ title: '✅ Wallet saved! Buyers can now pay you with crypto.', type: 'success', duration: 3000 });
     } else {
       toaster.create({ title: 'Failed to save wallet', type: 'error', duration: 3000 });
@@ -180,6 +202,7 @@ export default function SellerDashboard() {
         setSavingWallet(false);
         if (res.ok) {
           setSavedWallet(accounts[0]);
+          fetchSellerBalance(accounts[0]);
           toaster.create({ title: '🦊 MetaMask connected & wallet saved!', type: 'success', duration: 4000 });
         }
       }
@@ -196,6 +219,10 @@ export default function SellerDashboard() {
   const completed     = orders.filter(o => o.status === 'completed').length;
   const delivered     = orders.filter(o => o.status === 'delivered').length;
   const inEscrow      = orders.filter(o => ['in_escrow','delivered'].includes(o.status)).reduce((s, o) => s + Number(o.amount), 0);
+  const formatAmount = (amountRwf: number) =>
+    displayCurrency === "RWF"
+      ? `${amountRwf.toLocaleString()} RWF`
+      : `${(amountRwf / RWF_PER_ETH).toFixed(6)} ETH`;
 
   // NEW: drives warning badge + banner visibility
   const walletMissing = !savedWallet;
@@ -438,6 +465,30 @@ export default function SellerDashboard() {
               </div>
             ))}
           </nav>
+          {savedWallet && (
+            <div style={{ margin: '0 12px 8px', padding: '8px 12px', borderRadius: 9, background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.15)' }}>
+              <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.8px' }}>ETH Balance</div>
+              {loadingSellerBal ? (
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</div>
+              ) : sellerBalance !== null ? (
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+                  <span style={{ fontFamily: 'Syne, sans-serif', fontWeight: 700, fontSize: 16, color: 'var(--green)' }}>
+                    {parseFloat(sellerBalance).toFixed(5)}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>ETH</span>
+                  <button
+                    onClick={() => savedWallet && fetchSellerBalance(savedWallet)}
+                    style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 12, padding: '0 2px' }}
+                    title="Refresh"
+                  >
+                    ↺
+                  </button>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>—</div>
+              )}
+            </div>
+          )}
           <div className="sidebar-foot">
             <button className="sign-out" onClick={() => signOut({ callbackUrl: '/' })}>
               <span>🚪</span> Sign Out
@@ -460,9 +511,39 @@ export default function SellerDashboard() {
                 {tab === 'wallet'   && 'Manage your payout wallet'}
               </div>
             </div>
-            {tab === 'products' && (
-              <button className="btn btn-blue" onClick={openCreate}>＋ Add Product</button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 9, overflow: 'hidden' }}>
+                <button
+                  onClick={() => setDisplayCurrency("RWF")}
+                  style={{
+                    padding: '9px 10px',
+                    border: 'none',
+                    background: displayCurrency === "RWF" ? 'rgba(59,130,246,0.16)' : 'var(--panel)',
+                    color: displayCurrency === "RWF" ? 'var(--accent)' : 'var(--muted)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  RWF
+                </button>
+                <button
+                  onClick={() => setDisplayCurrency("ETH")}
+                  style={{
+                    padding: '9px 10px',
+                    border: 'none',
+                    background: displayCurrency === "ETH" ? 'rgba(59,130,246,0.16)' : 'var(--panel)',
+                    color: displayCurrency === "ETH" ? 'var(--accent)' : 'var(--muted)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ETH
+                </button>
+              </div>
+              {tab === 'products' && (
+                <button className="btn btn-blue" onClick={openCreate}>＋ Add Product</button>
+              )}
+            </div>
           </div>
 
           <div className="content">
@@ -503,7 +584,7 @@ export default function SellerDashboard() {
                     { label: 'Total Orders',  value: orders.length,                       color: '#3B82F6', icon: '📦', sub: 'All time'      },
                     { label: 'Awaiting',      value: pending,                             color: '#8B5CF6', icon: '⏳', sub: 'In progress'    },
                     { label: 'Delivered',     value: delivered,                           color: '#06B6D4', icon: '🚚', sub: 'Awaiting OTP'   },
-                    { label: 'Total Earned',  value: `${totalEarnings.toLocaleString()}`, color: '#10B981', icon: '💰', sub: 'RWF completed'  },
+                    { label: 'Total Earned',  value: formatAmount(totalEarnings), color: '#10B981', icon: '💰', sub: 'Completed payouts'  },
                   ].map(s => (
                     <div className="stat-card" key={s.label}>
                       <span className="stat-icon">{s.icon}</span>
@@ -539,7 +620,7 @@ export default function SellerDashboard() {
                           </span>
                         </div>
                         <div className="order-meta">
-                          <div className="meta-item"><span className="meta-label">Amount</span><span className="meta-value">{Number(order.amount).toLocaleString()} RWF</span></div>
+                          <div className="meta-item"><span className="meta-label">Amount</span><span className="meta-value">{formatAmount(Number(order.amount))}</span></div>
                           {order.buyer_name && <div className="meta-item"><span className="meta-label">Buyer</span><span className="meta-value">{order.buyer_name}</span></div>}
                           <div className="meta-item"><span className="meta-label">Date</span><span className="meta-value">{new Date(order.created_at).toLocaleDateString()}</span></div>
                         </div>
@@ -607,7 +688,7 @@ export default function SellerDashboard() {
                         <div className="product-name">{product.name}</div>
                         <div className="product-desc">{product.description}</div>
                         <div className="product-foot">
-                          <span className="product-price">{Number(product.price).toLocaleString()} RWF</span>
+                          <span className="product-price">{formatAmount(Number(product.price))}</span>
                           <span className="pill pill-blue">{product.category}</span>
                         </div>
                       </div>
@@ -622,8 +703,8 @@ export default function SellerDashboard() {
               <>
                 <div className="earn-grid">
                   {[
-                    { label: 'Total Earned',     value: `${totalEarnings.toLocaleString()} RWF`, color: '#10B981', sub: 'From completed orders' },
-                    { label: 'Pending Release',  value: `${inEscrow.toLocaleString()} RWF`,      color: '#8B5CF6', sub: 'Locked in escrow'       },
+                    { label: 'Total Earned',     value: formatAmount(totalEarnings), color: '#10B981', sub: 'From completed orders' },
+                    { label: 'Pending Release',  value: formatAmount(inEscrow),      color: '#8B5CF6', sub: 'Locked in escrow'       },
                     { label: 'Completed Orders', value: `${completed}`,                          color: '#3B82F6', sub: 'Successfully delivered'  },
                   ].map(s => (
                     <div className="earn-card" key={s.label}>

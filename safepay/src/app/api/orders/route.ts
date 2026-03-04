@@ -4,6 +4,9 @@ import { authOptions } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { processPayment } from "@/lib/payment-gateway";
 
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -55,6 +58,16 @@ export async function POST(req: NextRequest) {
 
     if (!seller_id || !item_name || !amount || !payment_method) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
+    }
+
+    if (
+      payment_method === "crypto" &&
+      (!order_id || !UUID_V4_RE.test(String(order_id)))
+    ) {
+      return NextResponse.json(
+        { error: "For crypto orders, order_id must be a valid UUID v4" },
+        { status: 400 }
+      );
     }
 
     // Step 1 — create order as 'pending' (or use client-provided id for crypto flow)

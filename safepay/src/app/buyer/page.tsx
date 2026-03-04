@@ -6,7 +6,6 @@ import { Suspense, useEffect, useState } from "react";
 import { toaster } from "@/components/ui/toaster";
 import { Order, Product } from "@/types";
 
-// ── Import the deployed contract ABI ─────────────────────────────────────────
 import { CREATE_ESCROW_ABI } from "../../lib/SafePayEscrow.abi";
 
 const CATEGORIES = ['All', 'Shoes', 'Bags', 'Electronics', 'Fashion', 'Accessories', 'Beauty'];
@@ -23,18 +22,28 @@ const STATUS_STYLE: Record<string, { bg: string; text: string; dot: string }> = 
 
 type CartItem = Product & { qty: number };
 type OrderWithSeller = Order & { seller_name?: string; tx_hash?: string };
+type Currency = "RWF" | "ETH";
 type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] | object }) => Promise<unknown>;
 };
 
-// ── Contract config (set in .env.local) ──────────────────────────────────────
-const CONTRACT_ADDRESS  = process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS as string;
-const SEPOLIA_CHAIN_ID  = 11155111;
-const RWF_PER_ETH       = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH  || "4000000");
-const MIN_ESCROW_ETH    = Number(process.env.NEXT_PUBLIC_SEPOLIA_MIN_ESCROW_ETH || "0.00001");
-const EXPLORER_URL      = process.env.NEXT_PUBLIC_BLOCK_EXPLORER_URL || "https://sepolia.etherscan.io";
+function createUuidV4(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  if (!c?.getRandomValues) throw new Error("Secure random generator unavailable for order id creation");
+  const bytes = new Uint8Array(16);
+  c.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
+const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS as string;
+const SEPOLIA_CHAIN_ID = 11155111;
+const RWF_PER_ETH      = Number(process.env.NEXT_PUBLIC_SEPOLIA_RWF_PER_ETH   || "4000000");
+const MIN_ESCROW_ETH   = Number(process.env.NEXT_PUBLIC_SEPOLIA_MIN_ESCROW_ETH || "0.00001");
+const EXPLORER_URL     = process.env.NEXT_PUBLIC_BLOCK_EXPLORER_URL || "https://sepolia.etherscan.io";
 
 function BuyerDashboardContent() {
   const { data: session } = useSession();
@@ -44,47 +53,53 @@ function BuyerDashboardContent() {
     searchParams.get('tab') === 'orders' ? 'orders' : 'shop'
   );
 
-  const [products, setProducts]   = useState<Product[]>([]);
-  const [category, setCategory]   = useState('All');
-  const [search, setSearch]       = useState('');
-  const [fetching, setFetching]   = useState(true);
-  const [orders, setOrders]       = useState<OrderWithSeller[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [category, setCategory] = useState('All');
+  const [search,   setSearch]   = useState('');
+  const [displayCurrency, setDisplayCurrency] = useState<Currency>("RWF");
+  const [fetching, setFetching] = useState(true);
+  const [orders,   setOrders]   = useState<OrderWithSeller[]>([]);
 
-  // ── cart ─────────────────────────────────────────────
-  const [cart, setCart]           = useState<CartItem[]>([]);
-  const [cartOpen, setCartOpen]   = useState(false);
-  const [payMethod, setPayMethod] = useState<'mobile_money' | 'crypto'>('mobile_money');
-  const [checkingOut, setCheckingOut]   = useState(false);
+  // cart
+  const [cart,         setCart]         = useState<CartItem[]>([]);
+  const [cartOpen,     setCartOpen]     = useState(false);
+  const [payMethod,    setPayMethod]    = useState<'mobile_money' | 'crypto'>('mobile_money');
+  const [checkingOut,  setCheckingOut]  = useState(false);
   const [checkoutDone, setCheckoutDone] = useState(false);
   const [lastReceipts, setLastReceipts] = useState<Array<{
     item_name: string; amount: number; gateway_ref: string; tx_hash: string; method: string;
   }>>([]);
 
   // MoMo
-  const [momoPhone, setMomoPhone] = useState('');
-  const [momoRef, setMomoRef]     = useState<string | null>(null);
+  const [momoPhone,  setMomoPhone]  = useState('');
+  const [momoRef,    setMomoRef]    = useState<string | null>(null);
   const [momoStatus, setMomoStatus] = useState('');
   const [momoPaying, setMomoPaying] = useState(false);
 
   // MetaMask
-  const [hasMetaMask, setHasMetaMask]       = useState(false);
+  const [hasMetaMask,     setHasMetaMask]     = useState(false);
   const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
-  const [connectingMM, setConnectingMM]       = useState(false);
-  const [cryptoStep, setCryptoStep]         = useState<'idle' | 'signing' | 'waiting' | 'done'>('idle');
-  const [cryptoProgress, setCryptoProgress] = useState('');
+  const [connectingMM,    setConnectingMM]    = useState(false);
+  const [cryptoStep,      setCryptoStep]      = useState<'idle' | 'signing' | 'waiting' | 'done'>('idle');
+  const [cryptoProgress,  setCryptoProgress]  = useState('');
 
-  // ── otp ──────────────────────────────────────────────
-  const [otpOrder, setOtpOrder]         = useState<OrderWithSeller | null>(null);
+  // NEW: ETH balance
+  const [walletBalance,  setWalletBalance]  = useState<string | null>(null);
+  const [loadingBalance, setLoadingBalance] = useState(false);
+
+  // otp
+  const [otpOrder,     setOtpOrder]     = useState<OrderWithSeller | null>(null);
   const [generatedOtp, setGeneratedOtp] = useState<string | null>(null);
-  const [otpInput, setOtpInput]         = useState('');
-  const [otpLoading, setOtpLoading]     = useState(false);
+  const [otpInput,     setOtpInput]     = useState('');
+  const [otpLoading,   setOtpLoading]   = useState(false);
+  const [otpCopied,    setOtpCopied]    = useState(false); // NEW
 
-  // ── dispute ──────────────────────────────────────────
-  const [disputeOrder, setDisputeOrder]   = useState<OrderWithSeller | null>(null);
-  const [disputeReason, setDisputeReason] = useState('');
+  // dispute
+  const [disputeOrder,   setDisputeOrder]   = useState<OrderWithSeller | null>(null);
+  const [disputeReason,  setDisputeReason]  = useState('');
   const [disputeLoading, setDisputeLoading] = useState(false);
 
-  // ── fetchers ─────────────────────────────────────────
+  // ── fetchers ──────────────────────────────────────────────
   async function fetchProducts(cat = 'All') {
     setFetching(true);
     const url  = cat === 'All' ? '/api/products' : `/api/products?category=${encodeURIComponent(cat)}`;
@@ -100,6 +115,20 @@ function BuyerDashboardContent() {
     setOrders(data.orders || []);
   }
 
+  // NEW: fetch ETH balance using ethers BrowserProvider
+  async function fetchWalletBalance(address: string) {
+    setLoadingBalance(true);
+    try {
+      const { ethers } = await import('ethers');
+      const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
+      if (!ethereum) return;
+      const provider = new ethers.BrowserProvider(ethereum);
+      const raw = await provider.getBalance(address);
+      setWalletBalance(ethers.formatEther(raw));
+    } catch { setWalletBalance(null); }
+    finally { setLoadingBalance(false); }
+  }
+
   async function connectMetaMask() {
     const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
     if (!ethereum) return;
@@ -110,15 +139,22 @@ function BuyerDashboardContent() {
         setConnectedWallet(accounts[0]);
         toaster.create({
           title: `🦊 Connected: ${accounts[0].slice(0,8)}…${accounts[0].slice(-6)}`,
-          type: 'success',
-          duration: 3000,
+          type: 'success', duration: 3000,
         });
+        fetchWalletBalance(accounts[0]); // NEW
       }
-    } catch {
-      // user rejected: keep silent
-    } finally {
-      setConnectingMM(false);
-    }
+    } catch { /* user rejected */ }
+    finally { setConnectingMM(false); }
+  }
+
+  // NEW: copy OTP to clipboard
+  function copyOtp() {
+    if (!generatedOtp) return;
+    navigator.clipboard.writeText(generatedOtp).then(() => {
+      setOtpCopied(true);
+      toaster.create({ title: '📋 OTP copied!', type: 'success', duration: 1500 });
+      setTimeout(() => setOtpCopied(false), 2000);
+    });
   }
 
   useEffect(() => { fetchProducts(); fetchOrders(); }, []);
@@ -133,13 +169,16 @@ function BuyerDashboardContent() {
       eth.request({ method: 'eth_accounts' })
         .then((accounts) => {
           const accs = accounts as string[];
-          if (accs.length > 0) setConnectedWallet(accs[0]);
+          if (accs.length > 0) {
+            setConnectedWallet(accs[0]);
+            fetchWalletBalance(accs[0]); // NEW: auto-fetch on load
+          }
         })
         .catch(() => {});
     }
   }, []);
 
-  // ── cart helpers ─────────────────────────────────────
+  // ── cart helpers ──────────────────────────────────────────
   function addToCart(product: Product) {
     setCart(prev => {
       const exists = prev.find(i => i.id === product.id);
@@ -158,54 +197,45 @@ function BuyerDashboardContent() {
   const cartTotal = cart.reduce((sum, i) => sum + Number(i.price) * i.qty, 0);
   const cartCount = cart.reduce((sum, i) => sum + i.qty, 0);
   const inCartIds = new Set(cart.map(i => i.id));
+  const formatAmount = (amountRwf: number) =>
+    displayCurrency === "RWF"
+      ? `${amountRwf.toLocaleString()} RWF`
+      : `${(amountRwf / RWF_PER_ETH).toFixed(6)} ETH`;
 
-  // ── CHECKOUT ─────────────────────────────────────────
+  // ── CHECKOUT ──────────────────────────────────────────────
   async function handleCheckout() {
     if (cart.length === 0) return;
 
-    // ── MoMo path ────────────────────────────────────
+    // MoMo path
     if (payMethod === "mobile_money") {
       if (!momoPhone.trim()) {
         toaster.create({ title: "Enter MoMo phone number", type: "warning", duration: 3000 });
         return;
       }
-
-      setMomoPaying(true);
-      setMomoStatus("Sending MoMo prompt…");
-      setMomoRef(null);
+      setMomoPaying(true); setMomoStatus("Sending MoMo prompt…"); setMomoRef(null);
 
       const payRes = await fetch("/api/payments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          amount: String(cartTotal),
-          phoneNumber: momoPhone.trim(),
-          orderId: `cart-${Date.now()}`,
-        }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: String(cartTotal), phoneNumber: momoPhone.trim(), orderId: `cart-${Date.now()}` }),
       });
-
       const payData = await payRes.json();
       if (!payRes.ok) {
-        setMomoPaying(false);
-        setMomoStatus("");
+        setMomoPaying(false); setMomoStatus("");
         toaster.create({ title: payData.error || "MoMo payment failed", type: "error", duration: 4000 });
         return;
       }
 
       const referenceId = payData.referenceId as string;
-      setMomoRef(referenceId);
-      setMomoStatus("Prompt sent. Approve on phone…");
+      setMomoRef(referenceId); setMomoStatus("Prompt sent. Approve on phone…");
 
-      // Poll up to 60s
-      const start = Date.now();
-      let paidOk = false;
+      const start = Date.now(); let paidOk = false;
       while (Date.now() - start < 60000) {
-        const stRes  = await fetch(`/api/payments/${referenceId}`);
+        const stRes = await fetch(`/api/payments/${referenceId}`);
         const stData = await stRes.json();
         const s = stData?.status;
         if (s) setMomoStatus(`Status: ${s}`);
         if (s === "SUCCESSFUL") { paidOk = true; break; }
-        if (s === "FAILED")      break;
+        if (s === "FAILED") break;
         await new Promise(r => setTimeout(r, 3000));
       }
 
@@ -215,41 +245,26 @@ function BuyerDashboardContent() {
         return;
       }
 
-      setMomoPaying(false);
-      setMomoStatus("✅ Payment successful!");
-
-      // Create orders in DB for MoMo
+      setMomoPaying(false); setMomoStatus("✅ Payment successful!");
       setCheckingOut(true);
       const receipts: typeof lastReceipts = [];
       let allOk = true;
 
       for (const item of cart) {
         for (let q = 0; q < item.qty; q++) {
-          const res  = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              seller_id:      item.seller_id,
-              item_name:      item.name,
-              amount:         item.price,
-              payment_method: "mobile_money",
-              momo_reference: referenceId,
-            }),
+          const res = await fetch("/api/orders", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ seller_id: item.seller_id, item_name: item.name, amount: item.price, payment_method: "mobile_money", momo_reference: referenceId }),
           });
           const data = await res.json();
-          if (res.ok) {
-            receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: "mobile_money" });
-          } else {
-            toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
-            allOk = false;
-          }
+          if (res.ok) receipts.push({ item_name: item.name, amount: Number(item.price), ...data.payment, method: "mobile_money" });
+          else { toaster.create({ title: `❌ ${item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 }); allOk = false; }
         }
       }
 
       setCheckingOut(false);
       if (receipts.length > 0) {
-        setLastReceipts(receipts);
-        setCheckoutDone(true);
+        setLastReceipts(receipts); setCheckoutDone(true);
         setCart([]); setCartOpen(false);
         setMomoPhone(""); setMomoRef(null); setMomoStatus("");
         await fetchOrders();
@@ -258,161 +273,87 @@ function BuyerDashboardContent() {
       return;
     }
 
-    // ── Crypto / MetaMask path ────────────────────────
+    // Crypto / MetaMask path
     if (payMethod === "crypto") {
       const ethereum = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
-      if (!ethereum) {
-        toaster.create({ title: "MetaMask not detected. Install MetaMask first.", type: "error", duration: 4000 });
-        return;
-      }
-
-      if (!CONTRACT_ADDRESS) {
-        toaster.create({ title: "Contract address not configured (NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS)", type: "error", duration: 5000 });
-        return;
-      }
+      if (!ethereum) { toaster.create({ title: "MetaMask not detected.", type: "error", duration: 4000 }); return; }
+      if (!CONTRACT_ADDRESS) { toaster.create({ title: "Contract address not configured", type: "error", duration: 5000 }); return; }
 
       try {
-        setCheckingOut(true);
-        setCryptoStep('signing');
-        setCryptoProgress("Connecting to MetaMask…");
+        setCheckingOut(true); setCryptoStep('signing'); setCryptoProgress("Connecting to MetaMask…");
 
-        // 1. Import ethers dynamically (keeps bundle lean for non-crypto users)
         const { ethers } = await import("ethers");
         const provider = new ethers.BrowserProvider(ethereum);
         await provider.send("eth_requestAccounts", []);
 
-        // 2. Ensure correct network (Sepolia)
         const network = await provider.getNetwork();
         if (Number(network.chainId) !== SEPOLIA_CHAIN_ID) {
           setCryptoProgress("Switching to Sepolia network…");
-          await provider.send("wallet_switchEthereumChain", [
-            { chainId: `0x${SEPOLIA_CHAIN_ID.toString(16)}` },
-          ]);
+          await provider.send("wallet_switchEthereumChain", [{ chainId: `0x${SEPOLIA_CHAIN_ID.toString(16)}` }]);
         }
 
         const signer = await provider.getSigner();
         const buyerAddress = await signer.getAddress();
         setConnectedWallet(buyerAddress);
 
-        // 3. Build the contract interface using the deployed ABI
-        //    CREATE_ESCROW_ABI is imported from lib/SafePayEscrow.abi.ts
-        const contract = new ethers.Contract(
-          CONTRACT_ADDRESS,
-          CREATE_ESCROW_ABI,
-          signer
-        );
-
+        const contract = new ethers.Contract(CONTRACT_ADDRESS, CREATE_ESCROW_ABI, signer);
         const cryptoPaidUnits: Array<{ order_id: string; item: CartItem; tx_hash: string }> = [];
         let unitIndex = 0;
         const totalUnits = cart.reduce((s, i) => s + i.qty, 0);
 
-        // 4. Process each cart item × qty
         for (const item of cart) {
-          if (!item.seller_wallet_address) {
-            throw new Error(`"${item.name}": seller has no wallet configured. Contact support.`);
-          }
-
+          if (!item.seller_wallet_address) throw new Error(`"${item.name}": seller has no wallet configured.`);
           for (let q = 0; q < item.qty; q++) {
             unitIndex++;
             const amountEth = Math.max(Number(item.price) / RWF_PER_ETH, MIN_ESCROW_ETH);
             const amountWei = ethers.parseEther(amountEth.toFixed(8));
+            const orderId   = createUuidV4();
 
-            // Unique orderId per unit
-            const orderId = `ord-${Date.now()}-${item.id.slice(0, 6)}-${q}-${Math.random().toString(16).slice(2, 8)}`;
-
-            // 5. Get backend signature for this (orderId, seller, amountWei)
             setCryptoProgress(`Signing escrow ${unitIndex}/${totalUnits}: ${item.name}…`);
             const sigRes = await fetch("/api/payments/crypto-sign", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                orderId,
-                seller:    item.seller_wallet_address,
-                amountWei: amountWei.toString(),
-                buyer:     buyerAddress,
-              }),
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ orderId, seller: item.seller_wallet_address, amountWei: amountWei.toString(), buyer: buyerAddress }),
             });
             const sigData = await sigRes.json();
             if (!sigRes.ok) throw new Error(sigData.error || `Signing failed for ${item.name}`);
 
-            // 6. Send transaction to the SafePayEscrow contract via MetaMask
-            setCryptoStep('waiting');
-            setCryptoProgress(`Waiting for MetaMask approval (${unitIndex}/${totalUnits})…`);
-
-            const tx = await contract.createEscrow(
-              orderId,
-              item.seller_wallet_address,
-              sigData.signature,
-              { value: amountWei }
-            );
-
+            setCryptoStep('waiting'); setCryptoProgress(`Waiting for MetaMask approval (${unitIndex}/${totalUnits})…`);
+            const tx = await contract.createEscrow(orderId, item.seller_wallet_address, sigData.signature, { value: amountWei });
             setCryptoProgress(`Mining tx ${unitIndex}/${totalUnits}…`);
             const receipt = await tx.wait();
             const txHash  = receipt?.hash ?? tx.hash;
 
             cryptoPaidUnits.push({ order_id: orderId, item, tx_hash: txHash });
-            toaster.create({
-              title:       `⛓ ${item.name} locked in escrow`,
-              description: `tx: ${(txHash as string).slice(0, 20)}…`,
-              type:        "success",
-              duration:    4000,
-            });
+            toaster.create({ title: `⛓ ${item.name} locked in escrow`, description: `tx: ${(txHash as string).slice(0,20)}…`, type: "success", duration: 4000 });
           }
         }
 
-        // 7. Record each paid unit in the DB
-        setCryptoStep('done');
-        setCryptoProgress("Recording orders…");
-        const receipts: typeof lastReceipts = [];
-        let allOk = true;
+        setCryptoStep('done'); setCryptoProgress("Recording orders…");
+        const receipts: typeof lastReceipts = []; let allOk = true;
 
         for (const unit of cryptoPaidUnits) {
-          const res  = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              order_id:        unit.order_id,
-              seller_id:       unit.item.seller_id,
-              item_name:       unit.item.name,
-              amount:          unit.item.price,
-              payment_method:  "crypto",
-              crypto_tx_hash:  unit.tx_hash,
-            }),
+          const res = await fetch("/api/orders", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: unit.order_id, seller_id: unit.item.seller_id, item_name: unit.item.name, amount: unit.item.price, payment_method: "crypto", crypto_tx_hash: unit.tx_hash }),
           });
           const data = await res.json();
-          if (res.ok) {
-            receipts.push({
-              item_name:   unit.item.name,
-              amount:      Number(unit.item.price),
-              gateway_ref: unit.order_id,
-              tx_hash:     unit.tx_hash,
-              method:      "crypto",
-              ...data.payment,
-            });
-          } else {
-            toaster.create({ title: `❌ ${unit.item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 });
-            allOk = false;
-          }
+          if (res.ok) receipts.push({ item_name: unit.item.name, amount: Number(unit.item.price), gateway_ref: unit.order_id, tx_hash: unit.tx_hash, method: "crypto", ...data.payment });
+          else { toaster.create({ title: `❌ ${unit.item.name}: ${data.error || "failed"}`, type: "error", duration: 4000 }); allOk = false; }
         }
 
-        setCheckingOut(false);
-        setCryptoStep('idle');
-        setCryptoProgress('');
+        setCheckingOut(false); setCryptoStep('idle'); setCryptoProgress('');
 
         if (receipts.length > 0) {
-          setLastReceipts(receipts);
-          setCheckoutDone(true);
+          setLastReceipts(receipts); setCheckoutDone(true);
           setCart([]); setCartOpen(false);
           await fetchOrders();
+          // NEW: refresh balance after checkout so buyer sees the decrease
+          if (connectedWallet) fetchWalletBalance(connectedWallet);
           if (allOk) toaster.create({ title: `✅ ${receipts.length} order(s) placed on-chain!`, type: "success", duration: 5000 });
         }
-
       } catch (err: unknown) {
-        setCheckingOut(false);
-        setCryptoStep('idle');
-        setCryptoProgress('');
+        setCheckingOut(false); setCryptoStep('idle'); setCryptoProgress('');
         const msg = err instanceof Error ? err.message : "MetaMask payment failed";
-        // User rejected = silent, anything else = toast
         if (!msg.includes("user rejected") && !msg.includes("User denied")) {
           toaster.create({ title: msg, type: "error", duration: 6000 });
         }
@@ -420,7 +361,7 @@ function BuyerDashboardContent() {
     }
   }
 
-  // ── OTP ──────────────────────────────────────────────
+  // ── OTP ───────────────────────────────────────────────────
   async function handleGenerateOtp() {
     if (!otpOrder) return;
     setOtpLoading(true);
@@ -433,9 +374,7 @@ function BuyerDashboardContent() {
     if (res.ok) {
       setGeneratedOtp(data.otp);
       toaster.create({
-        title: data.email_sent
-          ? `📧 OTP sent to ${data.email_to || session?.user?.email}`
-          : `⚠️ Email failed — use code on screen`,
+        title: data.email_sent ? `📧 OTP sent to ${data.email_to || session?.user?.email}` : `⚠️ Email failed — use code on screen`,
         type: data.email_sent ? 'info' : 'warning', duration: 4000,
       });
     } else {
@@ -460,7 +399,7 @@ function BuyerDashboardContent() {
     }
   }
 
-  // ── Dispute ──────────────────────────────────────────
+  // ── Dispute ───────────────────────────────────────────────
   async function handleOpenDispute() {
     if (!disputeOrder || !disputeReason.trim()) return;
     setDisputeLoading(true);
@@ -477,7 +416,7 @@ function BuyerDashboardContent() {
     }
   }
 
-  // ── Stats ─────────────────────────────────────────────
+  // ── Stats ─────────────────────────────────────────────────
   const completed = orders.filter(o => o.status === 'completed').length;
   const inEscrow  = orders.filter(o => ['in_escrow','paid','pending'].includes(o.status)).length;
   const disputed  = orders.filter(o => o.status === 'disputed').length;
@@ -499,234 +438,252 @@ function BuyerDashboardContent() {
     setCheckoutDone(false); setLastReceipts([]);
   }
 
-  // ── MetaMask step label ───────────────────────────────
   function cryptoButtonLabel() {
-    if (cryptoStep === 'signing')  return `✍️ Getting backend signature…`;
-    if (cryptoStep === 'waiting')  return `🦊 Approve in MetaMask…`;
-    if (cryptoStep === 'done')     return `⏳ Recording orders…`;
-    return `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`;
+    if (cryptoStep === 'signing') return `✍️ Getting backend signature…`;
+    if (cryptoStep === 'waiting') return `🦊 Approve in MetaMask…`;
+    if (cryptoStep === 'done')    return `⏳ Recording orders…`;
+    return `🔐 Checkout · ${formatAmount(cartTotal)}`;
   }
 
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        :root {
-          --navy:   #04080F; --deep:  #060B17; --panel: #0D1526;
-          --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
-          --accent: #3B82F6; --accent2: #2563EB;
-          --text:   #E8EDF5; --muted: #7B8BAD;
-          --green:  #10B981; --gold: #F59E0B; --red: #EF4444;
-          --purple: #8B5CF6;
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        :root{
+          --navy:#04080F;--deep:#060B17;--panel:#0D1526;
+          --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);
+          --accent:#3B82F6;--accent2:#2563EB;
+          --text:#E8EDF5;--muted:#7B8BAD;
+          --green:#10B981;--gold:#F59E0B;--red:#EF4444;--purple:#8B5CF6;
         }
-        body { background: var(--deep); color: var(--text); font-family: 'DM Sans', sans-serif; }
-        .dash-wrap { display: flex; min-height: 100vh; }
+        body{background:var(--deep);color:var(--text);font-family:'DM Sans',sans-serif}
+        .dash-wrap{display:flex;min-height:100vh}
 
         /* SIDEBAR */
-        .sidebar { width: 240px; flex-shrink: 0; background: var(--navy); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
-        .sidebar-logo { padding: 28px 24px 20px; font-family: 'Syne', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: -0.5px; border-bottom: 1px solid var(--border); }
-        .sidebar-logo span { color: var(--accent); }
-        .sidebar-user { padding: 16px 20px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
-        .avatar { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #10B981, #059669); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; flex-shrink: 0; }
-        .user-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .user-role { font-size: 11px; color: var(--muted); }
-        .sidebar-nav { flex: 1; padding: 16px 12px; display: flex; flex-direction: column; gap: 4px; }
-        .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 14px; color: var(--muted); transition: all .15s; border: 1px solid transparent; user-select: none; }
-        .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.04); }
-        .nav-item.active { color: var(--text); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.2); }
-        .nav-badge { background: rgba(59,130,246,0.2); color: var(--accent); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 100px; }
-        .nav-badge-green { background: rgba(16,185,129,0.2); color: var(--green); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 100px; }
-        .sidebar-foot { padding: 16px 12px; border-top: 1px solid var(--border); }
-        .sign-out { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--muted); transition: all .15s; background: none; border: none; width: 100%; font-family: 'DM Sans', sans-serif; }
-        .sign-out:hover { color: var(--red); background: rgba(239,68,68,0.07); }
+        .sidebar{width:240px;flex-shrink:0;background:var(--navy);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+        .sidebar-logo{padding:28px 24px 20px;font-family:'Syne',sans-serif;font-weight:800;font-size:20px;letter-spacing:-0.5px;border-bottom:1px solid var(--border)}
+        .sidebar-logo span{color:var(--accent)}
+        .sidebar-user{padding:16px 20px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
+        .avatar{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#10B981,#059669);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0}
+        .user-name{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .user-role{font-size:11px;color:var(--muted)}
+        .sidebar-nav{flex:1;padding:16px 12px;display:flex;flex-direction:column;gap:4px}
+        .nav-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;cursor:pointer;font-size:14px;color:var(--muted);transition:all .15s;border:1px solid transparent;user-select:none}
+        .nav-item:hover{color:var(--text);background:rgba(255,255,255,0.04)}
+        .nav-item.active{color:var(--text);background:rgba(59,130,246,0.12);border-color:rgba(59,130,246,0.2)}
+        .nav-badge{background:rgba(59,130,246,0.2);color:var(--accent);font-size:11px;font-weight:600;padding:1px 7px;border-radius:100px}
+        .nav-badge-green{background:rgba(16,185,129,0.2);color:var(--green);font-size:11px;font-weight:600;padding:1px 7px;border-radius:100px}
+
+        /* ETH balance widget — sidebar */
+        .sidebar-balance{margin:0 12px 6px;padding:10px 12px;border-radius:10px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.18)}
+        .balance-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:5px}
+        .balance-row{display:flex;align-items:baseline;gap:4px}
+        .balance-amount{font-family:'Syne',sans-serif;font-weight:700;font-size:17px;color:#a78bfa}
+        .balance-unit{font-size:11px;color:var(--muted)}
+        .balance-refresh{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0 2px;transition:color .15s;line-height:1}
+        .balance-refresh:hover{color:var(--text)}
+
+        .sidebar-foot{padding:16px 12px;border-top:1px solid var(--border)}
+        .sign-out{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted);transition:all .15s;background:none;border:none;width:100%;font-family:'DM Sans',sans-serif}
+        .sign-out:hover{color:var(--red);background:rgba(239,68,68,0.07)}
 
         /* MAIN */
-        .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-        .topbar { padding: 20px 32px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--navy); position: sticky; top: 0; z-index: 10; gap: 16px; }
-        .topbar-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.3px; }
-        .topbar-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
-        .topbar-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-        .content { padding: 28px 32px; flex: 1; }
+        .main{flex:1;display:flex;flex-direction:column;min-width:0}
+        .topbar{padding:20px 32px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--navy);position:sticky;top:0;z-index:10;gap:16px}
+        .topbar-title{font-family:'Syne',sans-serif;font-weight:700;font-size:20px;letter-spacing:-0.3px}
+        .topbar-sub{font-size:13px;color:var(--muted);margin-top:2px}
+        .topbar-right{display:flex;align-items:center;gap:12px;flex-shrink:0}
+        .content{padding:28px 32px;flex:1}
 
         /* SEARCH */
-        .search-wrap { position: relative; }
-        .search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; color: var(--muted); pointer-events: none; }
-        .search-input { width: 240px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 9px 14px 9px 36px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13px; outline: none; transition: border-color .2s; }
-        .search-input::placeholder { color: var(--muted); }
-        .search-input:focus { border-color: var(--accent); }
+        .search-wrap{position:relative}
+        .search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:14px;color:var(--muted);pointer-events:none}
+        .search-input{width:240px;background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:9px 14px 9px 36px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s}
+        .search-input::placeholder{color:var(--muted)}
+        .search-input:focus{border-color:var(--accent)}
 
         /* CART BUTTON */
-        .cart-btn { position: relative; display: flex; align-items: center; gap: 8px; padding: 9px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: all .15s; white-space: nowrap; }
-        .cart-btn:hover { border-color: var(--accent); }
-        .cart-btn.has-items { border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); }
-        .cart-count { background: var(--green); color: #fff; font-size: 11px; font-weight: 700; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+        .cart-btn{position:relative;display:flex;align-items:center;gap:8px;padding:9px 16px;background:var(--panel);border:1px solid var(--border);border-radius:9px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer;transition:all .15s;white-space:nowrap}
+        .cart-btn:hover{border-color:var(--accent)}
+        .cart-btn.has-items{border-color:rgba(16,185,129,0.4);background:rgba(16,185,129,0.08)}
+        .cart-count{background:var(--green);color:#fff;font-size:11px;font-weight:700;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center}
 
         /* CART DRAWER */
-        .cart-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; }
-        .cart-drawer { position: fixed; right: 0; top: 0; bottom: 0; width: 420px; background: var(--navy); border-left: 1px solid var(--border2); z-index: 201; display: flex; flex-direction: column; animation: slideIn .2s ease; }
-        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
-        .cart-head { padding: 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
-        .cart-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 18px; }
-        .cart-close { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
-        .cart-close:hover { border-color: var(--border2); color: var(--text); }
-        .cart-items { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-        .cart-item { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: flex; gap: 12px; align-items: center; }
-        .cart-item-img { width: 56px; height: 56px; border-radius: 8px; overflow: hidden; position: relative; flex-shrink: 0; background: var(--deep); }
-        .cart-item-info { flex: 1; min-width: 0; }
-        .cart-item-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
-        .cart-item-price { font-size: 13px; color: var(--accent); font-weight: 600; }
-        .cart-item-actions { display: flex; align-items: center; }
-        .qty-btn { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border); background: var(--deep); color: var(--text); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
-        .qty-btn:hover { border-color: var(--accent); color: var(--accent); }
-        .qty-val { width: 32px; text-align: center; font-size: 13px; font-weight: 600; }
-        .cart-remove { width: 26px; height: 26px; border-radius: 6px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.08); color: var(--red); font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; margin-left: 8px; transition: all .15s; }
-        .cart-remove:hover { background: rgba(239,68,68,0.18); }
-        .cart-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }
+        .cart-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:200}
+        .cart-drawer{position:fixed;right:0;top:0;bottom:0;width:420px;background:var(--navy);border-left:1px solid var(--border2);z-index:201;display:flex;flex-direction:column;animation:slideIn .2s ease}
+        @keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
+        .cart-head{padding:24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+        .cart-title{font-family:'Syne',sans-serif;font-weight:700;font-size:18px}
+        .cart-close{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+        .cart-close:hover{border-color:var(--border2);color:var(--text)}
+        .cart-items{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+        .cart-item{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;display:flex;gap:12px;align-items:center}
+        .cart-item-img{width:56px;height:56px;border-radius:8px;overflow:hidden;position:relative;flex-shrink:0;background:var(--deep)}
+        .cart-item-info{flex:1;min-width:0}
+        .cart-item-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+        .cart-item-price{font-size:13px;color:var(--accent);font-weight:600}
+        .cart-item-actions{display:flex;align-items:center}
+        .qty-btn{width:26px;height:26px;border-radius:6px;border:1px solid var(--border);background:var(--deep);color:var(--text);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+        .qty-btn:hover{border-color:var(--accent);color:var(--accent)}
+        .qty-val{width:32px;text-align:center;font-size:13px;font-weight:600}
+        .cart-remove{width:26px;height:26px;border-radius:6px;border:1px solid rgba(239,68,68,0.2);background:rgba(239,68,68,0.08);color:var(--red);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;margin-left:8px;transition:all .15s}
+        .cart-remove:hover{background:rgba(239,68,68,0.18)}
+        .cart-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted)}
+        .cart-foot{padding:16px;border-top:1px solid var(--border)}
+        .cart-total-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+        .cart-total-label{font-size:13px;color:var(--muted)}
+        .cart-total-value{font-family:'Syne',sans-serif;font-weight:700;font-size:22px;color:var(--accent)}
 
-        .cart-foot { padding: 16px; border-top: 1px solid var(--border); }
-        .cart-total-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
-        .cart-total-label { font-size: 13px; color: var(--muted); }
-        .cart-total-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 22px; color: var(--accent); }
+        /* ETH balance inside cart drawer */
+        .cart-balance-row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(139,92,246,0.07);border:1px solid rgba(139,92,246,0.18);border-radius:9px;margin-bottom:10px}
+        .cart-balance-label{font-size:11px;color:rgba(196,181,253,0.65)}
+        .cart-balance-value{font-family:'Syne',sans-serif;font-weight:700;font-size:14px;color:#a78bfa}
+        .cart-balance-unit{font-size:11px;color:var(--muted);margin-left:3px}
 
         /* Payment method tabs */
-        .pay-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
-        .pay-tab { padding: 10px 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all .15s; text-align: center; }
-        .pay-tab:hover { border-color: var(--border2); color: var(--text); }
-        .pay-tab.active-momo { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.08); color: #F59E0B; }
-        .pay-tab.active-crypto { border-color: rgba(139,92,246,0.4); background: rgba(139,92,246,0.08); color: var(--purple); }
+        .pay-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+        .pay-tab{padding:10px 8px;border-radius:9px;border:1px solid var(--border);background:var(--panel);color:var(--muted);font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;text-align:center}
+        .pay-tab:hover{border-color:var(--border2);color:var(--text)}
+        .pay-tab.active-momo{border-color:rgba(245,158,11,0.4);background:rgba(245,158,11,0.08);color:#F59E0B}
+        .pay-tab.active-crypto{border-color:rgba(139,92,246,0.4);background:rgba(139,92,246,0.08);color:var(--purple)}
 
-        /* Crypto progress bar */
-        .crypto-progress { background: rgba(139,92,246,0.07); border: 1px solid rgba(139,92,246,0.2); border-radius: 9px; padding: 10px 14px; font-size: 12px; color: #c4b5fd; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-        .crypto-spinner { width: 14px; height: 14px; border: 2px solid rgba(139,92,246,0.3); border-top-color: var(--purple); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        /* Crypto progress */
+        .crypto-progress{background:rgba(139,92,246,0.07);border:1px solid rgba(139,92,246,0.2);border-radius:9px;padding:10px 14px;font-size:12px;color:#c4b5fd;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+        .crypto-spinner{width:14px;height:14px;border:2px solid rgba(139,92,246,0.3);border-top-color:var(--purple);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+        @keyframes spin{to{transform:rotate(360deg)}}
 
         /* CATEGORIES */
-        .cat-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
-        .cat-pill { padding: 6px 14px; border-radius: 100px; font-size: 12px; font-weight: 500; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; transition: all .15s; white-space: nowrap; }
-        .cat-pill:hover { border-color: var(--border2); color: var(--text); }
-        .cat-pill.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: var(--accent); }
+        .cat-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
+        .cat-pill{padding:6px 14px;border-radius:100px;font-size:12px;font-weight:500;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;transition:all .15s;white-space:nowrap}
+        .cat-pill:hover{border-color:var(--border2);color:var(--text)}
+        .cat-pill.active{background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.4);color:var(--accent)}
 
         /* STAT CARDS */
-        .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 28px; }
-        .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px; position: relative; overflow: hidden; }
-        .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-        .stat-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 26px; letter-spacing: -0.5px; }
-        .stat-icon  { position: absolute; right: 16px; top: 16px; font-size: 20px; opacity: 0.35; }
+        .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+        .stat-card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;position:relative;overflow:hidden}
+        .stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+        .stat-value{font-family:'Syne',sans-serif;font-weight:700;font-size:26px;letter-spacing:-0.5px}
+        .stat-icon{position:absolute;right:16px;top:16px;font-size:20px;opacity:0.35}
 
         /* PRODUCTS */
-        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
-        .product-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; transition: border-color .2s, transform .2s; }
-        .product-card:hover { border-color: var(--border2); transform: translateY(-2px); }
-        .product-img { position: relative; height: 175px; background: var(--deep); }
-        .product-cat { position: absolute; top: 10px; right: 10px; background: rgba(59,130,246,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .in-cart-badge { position: absolute; top: 10px; left: 10px; background: rgba(16,185,129,0.85); backdrop-filter: blur(4px); color: #fff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 100px; }
-        .product-body { padding: 14px; }
-        .product-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .product-desc { font-size: 12px; color: var(--muted); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 36px; }
-        .product-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-        .product-price { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 15px; color: var(--accent); }
-        .product-seller { font-size: 11px; color: var(--muted); }
-        .add-btn { width: 100%; margin-top: 12px; padding: 10px; border-radius: 9px; background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25); color: var(--accent); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
-        .add-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-        .add-btn.in-cart { background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.3); color: var(--green); }
-        .add-btn.in-cart:hover { background: var(--green); color: #fff; border-color: var(--green); }
+        .product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+        .product-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;overflow:hidden;transition:border-color .2s,transform .2s}
+        .product-card:hover{border-color:var(--border2);transform:translateY(-2px)}
+        .product-img{position:relative;height:175px;background:var(--deep)}
+        .product-cat{position:absolute;top:10px;right:10px;background:rgba(59,130,246,0.85);backdrop-filter:blur(4px);color:#fff;font-size:10px;font-weight:600;padding:3px 8px;border-radius:100px;text-transform:uppercase;letter-spacing:0.5px}
+        .in-cart-badge{position:absolute;top:10px;left:10px;background:rgba(16,185,129,0.85);backdrop-filter:blur(4px);color:#fff;font-size:10px;font-weight:600;padding:3px 8px;border-radius:100px}
+        .product-body{padding:14px}
+        .product-name{font-weight:600;font-size:14px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .product-desc{font-size:12px;color:var(--muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px}
+        .product-foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+        .product-price{font-family:'Syne',sans-serif;font-weight:700;font-size:15px;color:var(--accent)}
+        .product-seller{font-size:11px;color:var(--muted)}
+        .add-btn{width:100%;margin-top:12px;padding:10px;border-radius:9px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.25);color:var(--accent);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s}
+        .add-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+        .add-btn.in-cart{background:rgba(16,185,129,0.1);border-color:rgba(16,185,129,0.3);color:var(--green)}
+        .add-btn.in-cart:hover{background:var(--green);color:#fff;border-color:var(--green)}
 
         /* BUTTONS */
-        .btn { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px; border-radius: 9px; font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; border: none; white-space: nowrap; }
-        .btn-blue  { background: var(--accent); color: #fff; box-shadow: 0 0 20px rgba(59,130,246,0.25); }
-        .btn-blue:hover  { background: var(--accent2); transform: translateY(-1px); }
-        .btn-green { background: var(--green); color: #fff; }
-        .btn-green:hover { background: #059669; }
-        .btn-red-outline { background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
-        .btn-red-outline:hover { background: rgba(239,68,68,0.18); }
-        .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
-        .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
-        .btn-lg { padding: 13px 24px; font-size: 15px; border-radius: 10px; width: 100%; justify-content: center; }
-        .btn-sm { padding: 6px 12px; font-size: 12px; }
-        .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
-        .back-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; padding: 6px 0; margin-bottom: 20px; transition: color .15s; }
-        .back-btn:hover { color: var(--text); }
+        .btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:9px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;border:none;white-space:nowrap}
+        .btn-blue{background:var(--accent);color:#fff;box-shadow:0 0 20px rgba(59,130,246,0.25)}
+        .btn-blue:hover{background:var(--accent2);transform:translateY(-1px)}
+        .btn-green{background:var(--green);color:#fff}
+        .btn-green:hover{background:#059669}
+        .btn-red-outline{background:rgba(239,68,68,0.1);color:var(--red);border:1px solid rgba(239,68,68,0.25)}
+        .btn-red-outline:hover{background:rgba(239,68,68,0.18)}
+        .btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border2)}
+        .btn-ghost:hover{color:var(--text);border-color:var(--accent)}
+        .btn-lg{padding:13px 24px;font-size:15px;border-radius:10px;width:100%;justify-content:center}
+        .btn-sm{padding:6px 12px;font-size:12px}
+        .btn:disabled{opacity:0.45;cursor:not-allowed;transform:none!important}
+        .back-btn{display:inline-flex;align-items:center;gap:6px;background:none;border:none;color:var(--muted);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer;padding:6px 0;margin-bottom:20px;transition:color .15s}
+        .back-btn:hover{color:var(--text)}
 
         /* RECEIPT */
-        .receipt-wrap { max-width: 600px; margin: 0 auto; }
-        .receipt-header { background: linear-gradient(135deg, #065f46, #047857); border-radius: 14px 14px 0 0; padding: 28px 24px; text-align: center; }
-        .receipt-icon { font-size: 36px; margin-bottom: 8px; }
-        .receipt-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; color: #fff; margin-bottom: 4px; }
-        .receipt-sub { font-size: 13px; color: rgba(255,255,255,0.65); }
-        .receipt-body { background: var(--panel); border: 1px solid var(--border); border-top: none; border-radius: 0 0 14px 14px; padding: 24px; }
-        .receipt-item { background: var(--deep); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
-        .receipt-item-name { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
-        .receipt-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
-        .receipt-row:last-child { border-bottom: none; }
-        .receipt-row-label { font-size: 12px; color: var(--muted); }
-        .receipt-row-value { font-size: 12px; font-weight: 500; }
-        .tx-box { background: var(--deep); border-radius: 8px; padding: 8px 12px; margin-top: 6px; }
-        .tx-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
-        .tx-value { font-size: 11px; font-family: monospace; color: var(--accent); word-break: break-all; }
-        .notice { padding: 10px 14px; border-radius: 9px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+        .receipt-wrap{max-width:600px;margin:0 auto}
+        .receipt-header{background:linear-gradient(135deg,#065f46,#047857);border-radius:14px 14px 0 0;padding:28px 24px;text-align:center}
+        .receipt-icon{font-size:36px;margin-bottom:8px}
+        .receipt-title{font-family:'Syne',sans-serif;font-weight:700;font-size:20px;color:#fff;margin-bottom:4px}
+        .receipt-sub{font-size:13px;color:rgba(255,255,255,0.65)}
+        .receipt-body{background:var(--panel);border:1px solid var(--border);border-top:none;border-radius:0 0 14px 14px;padding:24px}
+        .receipt-item{background:var(--deep);border-radius:10px;padding:14px;margin-bottom:10px}
+        .receipt-item-name{font-weight:600;font-size:14px;margin-bottom:8px}
+        .receipt-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)}
+        .receipt-row:last-child{border-bottom:none}
+        .receipt-row-label{font-size:12px;color:var(--muted)}
+        .receipt-row-value{font-size:12px;font-weight:500}
+        .tx-box{background:var(--deep);border-radius:8px;padding:8px 12px;margin-top:6px}
+        .tx-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}
+        .tx-value{font-size:11px;font-family:monospace;color:var(--accent);word-break:break-all}
+        .notice{padding:10px 14px;border-radius:9px;font-size:12px;display:flex;align-items:center;gap:8px}
 
         /* ORDERS */
-        .order-list { display: flex; flex-direction: column; gap: 10px; }
-        .order-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; transition: border-color .2s; }
-        .order-card:hover { border-color: var(--border2); }
-        .order-card.highlight { border-color: rgba(6,182,212,0.3); }
-        .order-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-        .order-name { font-weight: 600; font-size: 15px; }
-        .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 100px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-        .status-dot { width: 5px; height: 5px; border-radius: 50%; }
-        .order-meta { display: flex; gap: 24px; flex-wrap: wrap; }
-        .meta-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-        .meta-value { font-size: 13px; font-weight: 500; }
-        .divider { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+        .order-list{display:flex;flex-direction:column;gap:10px}
+        .order-card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px 20px;transition:border-color .2s}
+        .order-card:hover{border-color:var(--border2)}
+        .order-card.highlight{border-color:rgba(6,182,212,0.3)}
+        .order-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+        .order-name{font-weight:600;font-size:15px}
+        .status-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:100px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
+        .status-dot{width:5px;height:5px;border-radius:50%}
+        .order-meta{display:flex;gap:24px;flex-wrap:wrap}
+        .meta-label{font-size:11px;color:var(--muted);margin-bottom:2px}
+        .meta-value{font-size:13px;font-weight:500}
+        .divider{border:none;border-top:1px solid var(--border);margin:14px 0}
 
         /* OTP */
-        .otp-wrap { max-width: 500px; margin: 0 auto; }
-        .modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
-        .modal-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 20px; margin-bottom: 4px; }
-        .modal-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
-        .order-pill { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 10px; padding: 14px; margin-bottom: 20px; }
-        .order-pill-name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
-        .order-pill-amount { font-size: 13px; color: var(--muted); }
-        .step-box { background: var(--deep); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; }
-        .step-box.active { border-color: rgba(59,130,246,0.3); }
-        .step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-        .step-num { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: var(--accent); }
-        .step-num.dim { background: rgba(255,255,255,0.04); border-color: var(--border); color: var(--muted); }
-        .step-title { font-size: 13px; font-weight: 600; }
-        .otp-display { background: rgba(16,185,129,0.08); border: 2px solid rgba(16,185,129,0.3); border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 12px; }
-        .otp-label { font-size: 11px; color: var(--green); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-        .otp-code  { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 42px; letter-spacing: 8px; color: var(--green); }
-        .otp-exp   { font-size: 12px; color: var(--muted); margin-top: 6px; }
-        .otp-email { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #93c5fd; margin-top: 8px; }
-        .otp-input { width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; color: var(--text); font-family: 'Syne', sans-serif; font-size: 32px; font-weight: 700; letter-spacing: 12px; text-align: center; outline: none; transition: border-color .2s; margin-bottom: 12px; }
-        .otp-input:focus { border-color: var(--accent); }
-        .otp-input::placeholder { color: var(--border2); letter-spacing: 4px; font-size: 24px; }
-        .otp-input:disabled { opacity: 0.4; }
-        .warning-box { background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.2); border-radius: 9px; padding: 10px 14px; font-size: 12px; color: #fcd34d; margin-top: 14px; }
+        .otp-wrap{max-width:500px;margin:0 auto}
+        .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px}
+        .modal-title{font-family:'Syne',sans-serif;font-weight:700;font-size:20px;margin-bottom:4px}
+        .modal-sub{font-size:13px;color:var(--muted);margin-bottom:24px}
+        .order-pill{background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:10px;padding:14px;margin-bottom:20px}
+        .order-pill-name{font-weight:600;font-size:15px;margin-bottom:4px}
+        .order-pill-amount{font-size:13px;color:var(--muted)}
+        .step-box{background:var(--deep);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:14px}
+        .step-box.active{border-color:rgba(59,130,246,0.3)}
+        .step-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+        .step-num{width:26px;height:26px;border-radius:50%;flex-shrink:0;background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--accent)}
+        .step-num.dim{background:rgba(255,255,255,0.04);border-color:var(--border);color:var(--muted)}
+        .step-title{font-size:13px;font-weight:600}
+        .otp-display{background:rgba(16,185,129,0.08);border:2px solid rgba(16,185,129,0.3);border-radius:12px;padding:20px;text-align:center;margin-bottom:12px}
+        .otp-label{font-size:11px;color:var(--green);font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+        /* OTP code row with copy button */
+        .otp-code-row{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:6px}
+        .otp-code{font-family:'Syne',sans-serif;font-weight:800;font-size:42px;letter-spacing:8px;color:var(--green)}
+        .otp-copy-btn{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.35);border-radius:9px;color:var(--green);cursor:pointer;font-size:20px;padding:7px 11px;transition:all .15s;line-height:1;flex-shrink:0}
+        .otp-copy-btn:hover{background:rgba(16,185,129,0.28);transform:scale(1.08)}
+        .otp-copy-btn.copied{background:rgba(16,185,129,0.3);border-color:var(--green)}
+        .otp-exp{font-size:12px;color:var(--muted);margin-top:2px}
+        .otp-email{background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:8px;padding:8px 12px;font-size:12px;color:#93c5fd;margin-top:8px}
+        .otp-input{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;color:var(--text);font-family:'Syne',sans-serif;font-size:32px;font-weight:700;letter-spacing:12px;text-align:center;outline:none;transition:border-color .2s;margin-bottom:12px}
+        .otp-input:focus{border-color:var(--accent)}
+        .otp-input::placeholder{color:var(--border2);letter-spacing:4px;font-size:24px}
+        .otp-input:disabled{opacity:0.4}
+        .warning-box{background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.2);border-radius:9px;padding:10px 14px;font-size:12px;color:#fcd34d;margin-top:14px}
 
         /* DISPUTE */
-        .dispute-order-box { background: rgba(239,68,68,0.07); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 14px; margin-bottom: 20px; }
-        .dispute-order-name   { font-weight: 600; font-size: 15px; color: #fca5a5; margin-bottom: 4px; }
-        .dispute-order-amount { font-size: 13px; color: var(--muted); }
-        .dispute-textarea { width: 100%; background: var(--deep); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color .2s; resize: vertical; min-height: 120px; margin-bottom: 16px; }
-        .dispute-textarea:focus { border-color: var(--red); }
-        .dispute-textarea::placeholder { color: var(--muted); }
+        .dispute-order-box{background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:10px;padding:14px;margin-bottom:20px}
+        .dispute-order-name{font-weight:600;font-size:15px;color:#fca5a5;margin-bottom:4px}
+        .dispute-order-amount{font-size:13px;color:var(--muted)}
+        .dispute-textarea{width:100%;background:var(--deep);border:1px solid var(--border);border-radius:9px;padding:12px 14px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;outline:none;transition:border-color .2s;resize:vertical;min-height:120px;margin-bottom:16px}
+        .dispute-textarea:focus{border-color:var(--red)}
+        .dispute-textarea::placeholder{color:var(--muted)}
 
         /* EMPTY */
-        .empty { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 60px 20px; text-align: center; }
-        .empty-icon { font-size: 40px; margin-bottom: 12px; }
-        .empty-title { font-family: 'Syne', sans-serif; font-size: 16px; margin-bottom: 6px; }
-        .empty-sub { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
-        .delivered-alert { background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.25); border-radius: 10px; padding: 12px 16px; font-size: 13px; color: #67e8f9; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+        .empty{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:60px 20px;text-align:center}
+        .empty-icon{font-size:40px;margin-bottom:12px}
+        .empty-title{font-family:'Syne',sans-serif;font-size:16px;margin-bottom:6px}
+        .empty-sub{font-size:13px;color:var(--muted);margin-bottom:20px}
+        .delivered-alert{background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.25);border-radius:10px;padding:12px 16px;font-size:13px;color:#67e8f9;margin-bottom:20px;display:flex;align-items:center;gap:8px}
 
-        @media (max-width: 900px) {
-          .sidebar { display: none; }
-          .stat-grid { grid-template-columns: repeat(2,1fr); }
-          .content { padding: 20px 16px; }
-          .topbar { padding: 16px 20px; }
-          .cart-drawer { width: 100%; }
-          .search-input { width: 160px; }
+        @media(max-width:900px){
+          .sidebar{display:none}
+          .stat-grid{grid-template-columns:repeat(2,1fr)}
+          .content{padding:20px 16px}
+          .topbar{padding:16px 20px}
+          .cart-drawer{width:100%}
+          .search-input{width:160px}
         }
       `}</style>
 
@@ -756,24 +713,44 @@ function BuyerDashboardContent() {
               </div>
             ))}
             {cartCount > 0 && (
-              <div className="nav-item" onClick={() => setCartOpen(true)} style={{ marginTop: 8, borderColor: 'rgba(16,185,129,0.2)', background: 'rgba(16,185,129,0.06)', color: 'var(--green)' }}>
+              <div className="nav-item" onClick={() => setCartOpen(true)}
+                style={{ marginTop: 8, borderColor: 'rgba(16,185,129,0.2)', background: 'rgba(16,185,129,0.06)', color: 'var(--green)' }}>
                 <span>🛒</span>
                 <span style={{ flex: 1 }}>Cart</span>
                 <span className="nav-badge-green">{cartCount}</span>
               </div>
             )}
           </nav>
+
+          {/* MetaMask status */}
           {hasMetaMask && (
             connectedWallet ? (
-              <div style={{ margin: '0 12px 8px', padding: '8px 12px', borderRadius: 9, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px var(--green)', flexShrink: 0 }} />
-                <div>
-                  <div style={{ fontSize: 10, color: 'rgba(110,231,183,0.6)', marginBottom: 1 }}>MetaMask</div>
-                  <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#6ee7b7' }}>
-                    {connectedWallet.slice(0,8)}…{connectedWallet.slice(-6)}
+              <>
+                <div style={{ margin: '0 12px 6px', padding: '8px 12px', borderRadius: 9, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px var(--green)', flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontSize: 10, color: 'rgba(110,231,183,0.6)', marginBottom: 1 }}>MetaMask</div>
+                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#6ee7b7' }}>
+                      {connectedWallet.slice(0,8)}…{connectedWallet.slice(-6)}
+                    </div>
                   </div>
                 </div>
-              </div>
+                {/* ETH balance widget */}
+                <div className="sidebar-balance">
+                  <div className="balance-label">ETH Balance</div>
+                  {loadingBalance ? (
+                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</div>
+                  ) : walletBalance !== null ? (
+                    <div className="balance-row">
+                      <span className="balance-amount">{parseFloat(walletBalance).toFixed(5)}</span>
+                      <span className="balance-unit">ETH</span>
+                      <button className="balance-refresh" onClick={() => fetchWalletBalance(connectedWallet!)} title="Refresh">↺</button>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>—</div>
+                  )}
+                </div>
+              </>
             ) : (
               <div onClick={connectMetaMask} style={{ margin: '0 12px 8px', padding: '8px 12px', borderRadius: 9, background: 'rgba(249,115,22,0.07)', border: '1px solid rgba(249,115,22,0.2)', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                 <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0 }} />
@@ -785,6 +762,7 @@ function BuyerDashboardContent() {
               </div>
             )
           )}
+
           <div className="sidebar-foot">
             <button className="sign-out" onClick={() => signOut({ callbackUrl: '/' })}>
               <span>🚪</span> Sign Out
@@ -800,11 +778,11 @@ function BuyerDashboardContent() {
                 {checkoutDone && '✅ Orders Placed'}
                 {otpOrder && '🔑 Confirm Delivery'}
                 {disputeOrder && '⚠️ Open Dispute'}
-                {!checkoutDone && !otpOrder && !disputeOrder && tab === 'shop' && '🛍️ Shop'}
+                {!checkoutDone && !otpOrder && !disputeOrder && tab === 'shop'   && '🛍️ Shop'}
                 {!checkoutDone && !otpOrder && !disputeOrder && tab === 'orders' && '📦 My Orders'}
               </div>
               <div className="topbar-sub">
-                {tab === 'shop' && !checkoutDone && 'All payments secured by smart contract escrow'}
+                {tab === 'shop'   && !checkoutDone && 'All payments secured by smart contract escrow'}
                 {tab === 'orders' && !otpOrder && !disputeOrder && `${orders.length} order${orders.length !== 1 ? 's' : ''} total`}
               </div>
             </div>
@@ -815,6 +793,34 @@ function BuyerDashboardContent() {
                   <input className="search-input" value={search} placeholder="Search..." onChange={e => setSearch(e.target.value)} />
                 </div>
               )}
+              <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 9, overflow: 'hidden' }}>
+                <button
+                  onClick={() => setDisplayCurrency("RWF")}
+                  style={{
+                    padding: '9px 10px',
+                    border: 'none',
+                    background: displayCurrency === "RWF" ? 'rgba(59,130,246,0.16)' : 'var(--panel)',
+                    color: displayCurrency === "RWF" ? 'var(--accent)' : 'var(--muted)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  RWF
+                </button>
+                <button
+                  onClick={() => setDisplayCurrency("ETH")}
+                  style={{
+                    padding: '9px 10px',
+                    border: 'none',
+                    background: displayCurrency === "ETH" ? 'rgba(59,130,246,0.16)' : 'var(--panel)',
+                    color: displayCurrency === "ETH" ? 'var(--accent)' : 'var(--muted)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ETH
+                </button>
+              </div>
               <button className={`cart-btn ${cartCount > 0 ? 'has-items' : ''}`} onClick={() => setCartOpen(true)}>
                 🛒 Cart
                 {cartCount > 0 && <span className="cart-count">{cartCount}</span>}
@@ -852,7 +858,7 @@ function BuyerDashboardContent() {
                           <div className="product-name">{product.name}</div>
                           <div className="product-desc">{product.description}</div>
                           <div className="product-foot">
-                            <span className="product-price">{Number(product.price).toLocaleString()} RWF</span>
+                            <span className="product-price">{formatAmount(Number(product.price))}</span>
                             <span className="product-seller">{product.seller_name}</span>
                           </div>
                           <button className={`add-btn ${inCartIds.has(product.id) ? 'in-cart' : ''}`}
@@ -879,7 +885,7 @@ function BuyerDashboardContent() {
                   {lastReceipts.map((r, i) => (
                     <div className="receipt-item" key={i}>
                       <div className="receipt-item-name">{r.item_name}</div>
-                      <div className="receipt-row"><span className="receipt-row-label">Amount</span><span className="receipt-row-value">{r.amount.toLocaleString()} RWF</span></div>
+                      <div className="receipt-row"><span className="receipt-row-label">Amount</span><span className="receipt-row-value">{formatAmount(Number(r.amount))}</span></div>
                       <div className="receipt-row"><span className="receipt-row-label">Method</span><span className="receipt-row-value">{methodLabel[r.method] || r.method}</span></div>
                       <div className="receipt-row"><span className="receipt-row-label">Reference</span><span className="receipt-row-value">{r.gateway_ref}</span></div>
                       <div className="tx-box">
@@ -888,9 +894,7 @@ function BuyerDashboardContent() {
                           <div className="tx-value">{r.tx_hash}</div>
                           {r.tx_hash?.startsWith('0x') && (
                             <a href={`${EXPLORER_URL}/tx/${r.tx_hash}`} target="_blank" rel="noopener noreferrer"
-                              style={{ color: 'var(--accent)', fontSize: 11, flexShrink: 0, textDecoration: 'none' }}>
-                              View ↗
-                            </a>
+                              style={{ color: 'var(--accent)', fontSize: 11, flexShrink: 0, textDecoration: 'none' }}>View ↗</a>
                           )}
                         </div>
                       </div>
@@ -948,7 +952,7 @@ function BuyerDashboardContent() {
                           </span>
                         </div>
                         <div className="order-meta">
-                          <div><div className="meta-label">Amount</div><div className="meta-value">{Number(order.amount).toLocaleString()} RWF</div></div>
+                          <div><div className="meta-label">Amount</div><div className="meta-value">{formatAmount(Number(order.amount))}</div></div>
                           {order.seller_name && <div><div className="meta-label">Seller</div><div className="meta-value">{order.seller_name}</div></div>}
                           <div><div className="meta-label">Date</div><div className="meta-value">{new Date(order.created_at).toLocaleDateString()}</div></div>
                         </div>
@@ -996,33 +1000,68 @@ function BuyerDashboardContent() {
                   <div className="modal-sub">Verify you received your item to release payment to the seller</div>
                   <div className="order-pill">
                     <div className="order-pill-name">{otpOrder.item_name}</div>
-                    <div className="order-pill-amount">{Number(otpOrder.amount).toLocaleString()} RWF · locked in escrow</div>
+                    <div className="order-pill-amount">{formatAmount(Number(otpOrder.amount))} · locked in escrow</div>
                   </div>
+
+                  {/* Step 1 */}
                   <div className={`step-box ${!generatedOtp ? 'active' : ''}`}>
-                    <div className="step-head"><div className="step-num">1</div><div className="step-title">Generate your OTP</div></div>
+                    <div className="step-head">
+                      <div className="step-num">1</div>
+                      <div className="step-title">Generate your OTP</div>
+                    </div>
                     {!generatedOtp ? (
                       <>
-                        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>OTP will appear here and be emailed to <strong style={{ color: 'var(--text)' }}>{session?.user?.email}</strong></p>
-                        <button className="btn btn-ghost" style={{ width: '100%', justifyContent: 'center' }} onClick={handleGenerateOtp} disabled={otpLoading}>
+                        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+                          OTP will appear here and be emailed to <strong style={{ color: 'var(--text)' }}>{session?.user?.email}</strong>
+                        </p>
+                        <button className="btn btn-ghost" style={{ width: '100%', justifyContent: 'center' }}
+                          onClick={handleGenerateOtp} disabled={otpLoading}>
                           {otpLoading ? '⏳ Generating…' : '📧 Generate & Send OTP'}
                         </button>
                       </>
                     ) : (
                       <>
-                        <div className="otp-display"><div className="otp-label">Your OTP Code</div><div className="otp-code">{generatedOtp}</div><div className="otp-exp">⏱ Expires in 5 minutes</div></div>
+                        <div className="otp-display">
+                          <div className="otp-label">Your OTP Code</div>
+                          <div className="otp-code-row">
+                            <div className="otp-code">{generatedOtp}</div>
+                            <button className={`otp-copy-btn ${otpCopied ? 'copied' : ''}`} onClick={copyOtp} title="Copy OTP">
+                              {otpCopied ? '✅' : '📋'}
+                            </button>
+                          </div>
+                          <div className="otp-exp">⏱ Expires in 5 minutes</div>
+                        </div>
                         <div className="otp-email">📧 Also sent to {session?.user?.email}</div>
-                        <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => setGeneratedOtp(null)}>🔄 Regenerate</button>
+                        <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }}
+                          onClick={() => setGeneratedOtp(null)}>🔄 Regenerate</button>
                       </>
                     )}
                   </div>
+
+                  {/* Step 2 */}
                   <div className={`step-box ${generatedOtp ? 'active' : ''}`} style={{ opacity: generatedOtp ? 1 : 0.4 }}>
-                    <div className="step-head"><div className={`step-num ${generatedOtp ? '' : 'dim'}`}>2</div><div className="step-title">Enter OTP to release payment</div></div>
-                    <input className="otp-input" value={otpInput} placeholder="······" maxLength={6} disabled={!generatedOtp} onChange={e => setOtpInput(e.target.value.replace(/\D/g, ''))} />
-                    <button className="btn btn-green btn-lg" onClick={handleVerifyOtp} disabled={otpInput.length !== 6 || !generatedOtp || otpLoading}>
+                    <div className="step-head">
+                      <div className={`step-num ${generatedOtp ? '' : 'dim'}`}>2</div>
+                      <div className="step-title">Enter OTP to release payment</div>
+                    </div>
+                    <input
+                      className="otp-input"
+                      value={otpInput}
+                      placeholder="······"
+                      maxLength={6}
+                      disabled={!generatedOtp}
+                      onChange={e => setOtpInput(e.target.value.replace(/\D/g, ''))}
+                    />
+                    <button className="btn btn-green btn-lg"
+                      onClick={handleVerifyOtp}
+                      disabled={otpInput.length !== 6 || !generatedOtp || otpLoading}>
                       {otpLoading ? '⏳ Verifying…' : '✅ Confirm Delivery & Release Payment'}
                     </button>
                   </div>
-                  <div className="warning-box">⚠️ Only confirm after you have <strong>physically received</strong> your item. This action is irreversible.</div>
+
+                  <div className="warning-box">
+                    ⚠️ Only confirm after you have <strong>physically received</strong> your item. This action is irreversible.
+                  </div>
                 </div>
               </div>
             )}
@@ -1036,11 +1075,15 @@ function BuyerDashboardContent() {
                   <div className="modal-sub">Admin will review your case and issue a refund if applicable</div>
                   <div className="dispute-order-box">
                     <div className="dispute-order-name">{disputeOrder.item_name}</div>
-                    <div className="dispute-order-amount">{Number(disputeOrder.amount).toLocaleString()} RWF</div>
+                    <div className="dispute-order-amount">{formatAmount(Number(disputeOrder.amount))}</div>
                   </div>
-                  <label style={{ fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: 8 }}>Describe the issue</label>
-                  <textarea className="dispute-textarea" value={disputeReason} onChange={e => setDisputeReason(e.target.value)} placeholder="e.g. Item not delivered, wrong item received, item damaged..." />
-                  <button className="btn btn-lg" style={{ background: 'rgba(239,68,68,0.12)', color: 'var(--red)', border: '1px solid rgba(239,68,68,0.3)', width: '100%', justifyContent: 'center' }}
+                  <label style={{ fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: 8 }}>
+                    Describe the issue
+                  </label>
+                  <textarea className="dispute-textarea" value={disputeReason} onChange={e => setDisputeReason(e.target.value)}
+                    placeholder="e.g. Item not delivered, wrong item received, item damaged..." />
+                  <button className="btn btn-lg"
+                    style={{ background: 'rgba(239,68,68,0.12)', color: 'var(--red)', border: '1px solid rgba(239,68,68,0.3)', width: '100%', justifyContent: 'center' }}
                     onClick={handleOpenDispute} disabled={!disputeReason.trim() || disputeLoading}>
                     {disputeLoading ? '⏳ Submitting…' : '⚠️ Submit Dispute'}
                   </button>
@@ -1077,7 +1120,7 @@ function BuyerDashboardContent() {
                     </div>
                     <div className="cart-item-info">
                       <div className="cart-item-name">{item.name}</div>
-                      <div className="cart-item-price">{(Number(item.price) * item.qty).toLocaleString()} RWF</div>
+                      <div className="cart-item-price">{formatAmount(Number(item.price) * item.qty)}</div>
                     </div>
                     <div className="cart-item-actions">
                       <button className="qty-btn" onClick={() => updateQty(item.id, -1)}>−</button>
@@ -1094,24 +1137,18 @@ function BuyerDashboardContent() {
               <div className="cart-foot">
                 <div className="cart-total-row">
                   <span className="cart-total-label">Total ({cartCount} items)</span>
-                  <span className="cart-total-value">{cartTotal.toLocaleString()} RWF</span>
+                  <span className="cart-total-value">{formatAmount(cartTotal)}</span>
                 </div>
 
-                {/* ── Payment method tabs (MoMo | Crypto only) ── */}
+                {/* Payment method tabs */}
                 <div className="pay-tabs">
-                  <button
-                    className={`pay-tab ${payMethod === 'mobile_money' ? 'active-momo' : ''}`}
-                    onClick={() => setPayMethod('mobile_money')}>
-                    📱 MTN MoMo
-                  </button>
-                  <button
-                    className={`pay-tab ${payMethod === 'crypto' ? 'active-crypto' : ''}`}
-                    onClick={() => setPayMethod('crypto')}>
-                    🦊 Crypto (ETH)
-                  </button>
+                  <button className={`pay-tab ${payMethod === 'mobile_money' ? 'active-momo' : ''}`}
+                    onClick={() => setPayMethod('mobile_money')}>📱 MTN MoMo</button>
+                  <button className={`pay-tab ${payMethod === 'crypto' ? 'active-crypto' : ''}`}
+                    onClick={() => setPayMethod('crypto')}>🦊 Crypto (ETH)</button>
                 </div>
 
-                {/* ── MoMo inputs ── */}
+                {/* MoMo inputs */}
                 {payMethod === "mobile_money" && (
                   <div style={{ marginBottom: 12 }}>
                     <input
@@ -1125,22 +1162,33 @@ function BuyerDashboardContent() {
                   </div>
                 )}
 
-                {/* ── Crypto / MetaMask info ── */}
+                {/* Crypto / MetaMask */}
                 {payMethod === "crypto" && (
                   <div style={{ marginBottom: 12 }}>
                     {hasMetaMask ? (
                       connectedWallet ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 9, marginBottom: 8 }}>
-                          <span>🦊</span>
-                          <div style={{ fontFamily: 'monospace', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#6ee7b7' }}>
-                            {connectedWallet.slice(0,10)}…{connectedWallet.slice(-8)}
+                        <>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 9, marginBottom: 8 }}>
+                            <span>🦊</span>
+                            <div style={{ fontFamily: 'monospace', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#6ee7b7' }}>
+                              {connectedWallet.slice(0,10)}…{connectedWallet.slice(-8)}
+                            </div>
+                            <span style={{ fontSize: 10, background: 'rgba(16,185,129,0.2)', color: 'var(--green)', padding: '2px 7px', borderRadius: 100 }}>Connected</span>
                           </div>
-                          <span style={{ fontSize: 10, background: 'rgba(16,185,129,0.2)', color: 'var(--green)', padding: '2px 7px', borderRadius: 100 }}>Connected</span>
-                        </div>
+                          {/* ETH balance in cart when crypto is selected */}
+                          {walletBalance !== null && (
+                            <div className="cart-balance-row">
+                              <span className="cart-balance-label">Available balance</span>
+                              <span>
+                                <span className="cart-balance-value">{parseFloat(walletBalance).toFixed(5)}</span>
+                                <span className="cart-balance-unit">ETH</span>
+                              </span>
+                            </div>
+                          )}
+                        </>
                       ) : (
                         <button
-                          onClick={connectMetaMask}
-                          disabled={connectingMM}
+                          onClick={connectMetaMask} disabled={connectingMM}
                           style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: '9px', borderRadius: 9, background: 'linear-gradient(135deg,#f97316,#ea580c)', color: '#fff', fontFamily: 'DM Sans, sans-serif', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none', marginBottom: 8, opacity: connectingMM ? 0.5 : 1 }}>
                           {connectingMM ? '⏳ Connecting…' : '🦊 Connect MetaMask'}
                         </button>
@@ -1168,7 +1216,7 @@ function BuyerDashboardContent() {
                   </div>
                 )}
 
-                {/* ── Checkout button ── */}
+                {/* Checkout button */}
                 <button
                   className="btn btn-blue btn-lg"
                   onClick={handleCheckout}
@@ -1181,7 +1229,7 @@ function BuyerDashboardContent() {
                     ? "📱 Waiting for MoMo approval…"
                     : checkingOut
                       ? cryptoButtonLabel()
-                      : `🔐 Checkout · ${cartTotal.toLocaleString()} RWF`}
+                      : `🔐 Checkout · ${formatAmount(cartTotal)}`}
                 </button>
               </div>
             )}
