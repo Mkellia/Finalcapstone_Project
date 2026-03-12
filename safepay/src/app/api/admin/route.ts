@@ -22,6 +22,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 2a. Ensure disputes table has required columns (idempotent migration)
+  await query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution TEXT`);
+  await query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS tx_hash TEXT`);
+  await query(`ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`);
+
   // 2. Guard: dispute must exist and still be open
   const disputeResult = await query(
     `SELECT id, status FROM disputes WHERE id = $1`,
@@ -49,18 +54,19 @@ export async function POST(req: NextRequest) {
   // 4. On-chain refund for crypto payments
   if (method === "crypto") {
     try {
-      // refundBuyer() in @/lib/blockchain calls refundBuyer(orderId) on the
-      // SafePayEscrow contract and should return the tx hash
       txHash = await refundBuyer(order_id);
     } catch (chainErr) {
-      console.error("[admin] On-chain refund failed:", chainErr);
-      return NextResponse.json(
-        {
-          error: "On-chain refund failed",
-          detail: chainErr instanceof Error ? chainErr.message : String(chainErr),
-        },
-        { status: 500 }
-      );
+      const errMsg = chainErr instanceof Error ? chainErr.message : String(chainErr);
+      // If the escrow never existed on-chain (test order), skip and resolve in DB only
+      if (errMsg.includes("Escrow does not exist") || errMsg.includes("does not exist")) {
+        console.warn("[admin] No on-chain escrow found — resolving in DB only:", order_id);
+      } else {
+        console.error("[admin] On-chain refund failed:", chainErr);
+        return NextResponse.json(
+          { error: "On-chain refund failed", detail: errMsg },
+          { status: 500 }
+        );
+      }
     }
   }
 
