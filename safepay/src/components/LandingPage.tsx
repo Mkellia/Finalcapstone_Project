@@ -406,6 +406,8 @@ export default function LandingPage() {
           <Link href="/login"  style={{ color: 'var(--muted)', textDecoration: 'none' }}>Sign In</Link>
           <Link href="/register" style={{ color: 'var(--muted)', textDecoration: 'none' }}>Register</Link>
           <Link href="/seller" style={{ color: 'var(--muted)', textDecoration: 'none' }}>Seller Dashboard</Link>
+          <Link href="/legal#eula" style={{ color: 'var(--muted)', textDecoration: 'none' }}>Terms of Use</Link>
+          <Link href="/legal#privacy" style={{ color: 'var(--muted)', textDecoration: 'none' }}>Privacy Policy</Link>
         </div>
       </footer>
     </>

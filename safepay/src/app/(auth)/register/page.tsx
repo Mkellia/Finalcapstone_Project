@@ -6,12 +6,17 @@ import { toaster } from "@/components/ui/toaster";
 
 export default function RegisterPage() {
   const [form, setForm] = useState({ name: '', email: '', password: '', phone: '', role: 'buyer' });
+  const [agreed, setAgreed] = useState(false);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   async function handleRegister() {
     if (!form.name || !form.email || !form.password || !form.phone) {
       toaster.create({ title: 'All fields are required', type: 'error', duration: 3000 });
+      return;
+    }
+    if (!agreed) {
+      toaster.create({ title: 'Please agree to the Terms of Use and Privacy Policy', type: 'error', duration: 3000 });
       return;
     }
     setLoading(true);
@@ -266,6 +271,21 @@ export default function RegisterPage() {
                 onKeyDown={e => e.key === 'Enter' && handleRegister()}
               />
             </div>
+
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 16, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={agreed}
+                onChange={e => setAgreed(e.target.checked)}
+                style={{ marginTop: 3, accentColor: 'var(--accent)', flexShrink: 0 }}
+              />
+              <span style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+                I have read and agree to the{' '}
+                <NextLink href="/legal" style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 500 }}>
+                  Terms of Use and Privacy Policy
+                </NextLink>
+              </span>
+            </label>
 
             <button className="btn-submit" onClick={handleRegister} disabled={loading}>
               {loading ? 'Creating account…' : `Create ${form.role === 'seller' ? 'Seller' : 'Buyer'} Account →`}

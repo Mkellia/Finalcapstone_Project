@@ -1,26 +1,26 @@
 "use client";
 import NextLink from "next/link";
-import { signIn } from "next-auth/react";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toaster } from "@/components/ui/toaster";
 
-export default function LoginPage() {
-  const [email, setEmail]       = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading]   = useState(false);
-  const router = useRouter();
+export default function ForgotPasswordPage() {
+  const [email, setEmail]   = useState('');
+  const [loading, setLoading] = useState(false);
+  const [sent, setSent]     = useState(false);
 
-  async function handleLogin() {
-    setLoading(true);
-    const res = await signIn('credentials', { email, password, redirect: false });
-    setLoading(false);
-
-    if (res?.error) {
-      toaster.create({ title: 'Invalid credentials', type: 'error', duration: 3000 });
-    } else {
-      router.push('/');
+  async function handleSubmit() {
+    if (!email) {
+      toaster.create({ title: 'Please enter your email address', type: 'error', duration: 3000 });
+      return;
     }
+    setLoading(true);
+    await fetch('/api/auth/forgot-password', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email }),
+    });
+    setLoading(false);
+    setSent(true);
   }
 
   return (
@@ -31,13 +31,13 @@ export default function LoginPage() {
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         :root {
-          --navy:   #04080F;
-          --panel:  #0D1526;
-          --border: rgba(255,255,255,0.08);
-          --accent: #3B82F6;
-          --text:   #E8EDF5;
-          --muted:  #7B8BAD;
-          --green:  #10B981;
+          --navy:     #04080F;
+          --panel:    #0D1526;
+          --border:   rgba(255,255,255,0.08);
+          --accent:   #3B82F6;
+          --text:     #E8EDF5;
+          --muted:    #7B8BAD;
+          --green:    #10B981;
           --input-bg: #080D1A;
         }
 
@@ -49,7 +49,6 @@ export default function LoginPage() {
           grid-template-columns: 1fr 1fr;
         }
 
-        /* ── LEFT PANEL ── */
         .auth-left {
           background: linear-gradient(160deg, #0a1628 0%, #04080F 100%);
           border-right: 1px solid var(--border);
@@ -60,14 +59,12 @@ export default function LoginPage() {
         }
         .auth-left-glow {
           position: absolute; border-radius: 50%; filter: blur(80px); pointer-events: none;
-          width: 400px; height: 400px;
-          background: rgba(37,99,235,0.15);
+          width: 400px; height: 400px; background: rgba(37,99,235,0.15);
           top: -100px; right: -100px;
         }
         .auth-left-glow2 {
           position: absolute; border-radius: 50%; filter: blur(100px); pointer-events: none;
-          width: 300px; height: 300px;
-          background: rgba(16,185,129,0.07);
+          width: 300px; height: 300px; background: rgba(16,185,129,0.07);
           bottom: 0; left: -80px;
         }
         .auth-logo {
@@ -84,29 +81,17 @@ export default function LoginPage() {
           color: var(--text); margin-bottom: 18px;
         }
         .auth-left-body h1 em { font-style: normal; color: var(--accent); }
-        .auth-left-body p { font-size: 15px; color: var(--muted); line-height: 1.65; max-width: 340px; margin-bottom: 40px; }
-
-        .perks { display: flex; flex-direction: column; gap: 14px; }
-        .perk { display: flex; align-items: center; gap: 12px; }
-        .perk-icon {
-          width: 36px; height: 36px; border-radius: 9px;
-          background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.2);
-          display: flex; align-items: center; justify-content: center;
-          font-size: 16px; flex-shrink: 0;
-        }
-        .perk-text { font-size: 13px; color: var(--muted); }
-        .perk-text strong { color: var(--text); display: block; font-size: 14px; margin-bottom: 1px; }
+        .auth-left-body p { font-size: 15px; color: var(--muted); line-height: 1.65; max-width: 340px; }
 
         .auth-left-foot { position: relative; font-size: 12px; color: rgba(123,139,173,0.5); }
 
-        /* ── RIGHT PANEL ── */
         .auth-right {
           background: var(--navy);
           display: flex; align-items: center; justify-content: center;
           padding: 48px 32px;
         }
         .auth-card { width: 100%; max-width: 400px; }
-        .auth-card-head { margin-bottom: 36px; }
+        .auth-card-head { margin-bottom: 30px; }
         .auth-card-head h2 {
           font-family: 'Syne', sans-serif; font-weight: 700;
           font-size: 26px; letter-spacing: -0.5px; color: var(--text); margin-bottom: 6px;
@@ -119,8 +104,7 @@ export default function LoginPage() {
           background: var(--input-bg); border: 1px solid var(--border);
           border-radius: 9px; padding: 12px 14px;
           color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px;
-          outline: none; transition: border-color .2s;
-          width: 100%;
+          outline: none; transition: border-color .2s; width: 100%;
         }
         .field input::placeholder { color: var(--muted); }
         .field input:focus { border-color: var(--accent); }
@@ -132,16 +116,24 @@ export default function LoginPage() {
           font-size: 15px; font-weight: 500; cursor: pointer;
           transition: background .2s, transform .15s, opacity .2s;
           box-shadow: 0 0 28px rgba(59,130,246,0.3);
-          margin-top: 4px;
         }
         .btn-submit:hover:not(:disabled) { background: #1d4ed8; transform: translateY(-1px); }
         .btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
 
-        .auth-footer { margin-top: 24px; text-align: center; font-size: 13px; color: var(--muted); }
+        .auth-footer { margin-top: 20px; text-align: center; font-size: 13px; color: var(--muted); }
         .auth-footer a { color: var(--accent); text-decoration: none; font-weight: 500; }
         .auth-footer a:hover { text-decoration: underline; }
 
-        .divider { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+        .success-box {
+          background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25);
+          border-radius: 12px; padding: 24px; text-align: center;
+        }
+        .success-icon { font-size: 40px; margin-bottom: 12px; }
+        .success-box h3 {
+          font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 700;
+          color: var(--green); margin-bottom: 8px;
+        }
+        .success-box p { font-size: 14px; color: var(--muted); line-height: 1.6; }
 
         @media (max-width: 768px) {
           .auth-wrap { grid-template-columns: 1fr; }
@@ -158,66 +150,58 @@ export default function LoginPage() {
           <NextLink href="/" className="auth-logo">Safe<span>Pay</span></NextLink>
 
           <div className="auth-left-body">
-            <h1>Trade with <em>complete</em> confidence</h1>
-            <p>Your payments are held in escrow until you confirm delivery. No risk, no fraud — just secure commerce.</p>
-
-            <div className="perks">
-              {[
-                { icon: '🔐', title: 'Smart contract escrow', desc: 'Funds locked on-chain until you confirm' },
-                { icon: '⚡', title: 'OTP-based release',      desc: 'You control when payments are released' },
-                { icon: '🛡️', title: 'Dispute protection',     desc: 'Admin mediation for every conflict' },
-              ].map(p => (
-                <div className="perk" key={p.title}>
-                  <div className="perk-icon">{p.icon}</div>
-                  <div className="perk-text"><strong>{p.title}</strong>{p.desc}</div>
-                </div>
-              ))}
-            </div>
+            <h1>Reset your <em>password</em></h1>
+            <p>Enter the email address linked to your SafePay account. We&apos;ll send you a secure link to choose a new password.</p>
           </div>
 
-          <div className="auth-left-foot">© 2025 SafePay · Sepolia Testnet</div>
+          <div className="auth-left-foot">© 2026 SafePay · Sepolia Testnet</div>
         </div>
 
         {/* RIGHT */}
         <div className="auth-right">
           <div className="auth-card">
-            <div className="auth-card-head">
-              <h2>Welcome back</h2>
-              <p>Sign in to your SafePay account</p>
-            </div>
-
-            <div className="field">
-              <label>Email address</label>
-              <input
-                type="email" value={email} placeholder="you@example.com"
-                onChange={e => setEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              />
-            </div>
-
-            <div className="field">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <label>Password</label>
-                <NextLink href="/forgot-password" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>
-                  Forgot password?
-                </NextLink>
+            {sent ? (
+              <div className="success-box">
+                <div className="success-icon">📧</div>
+                <h3>Check your inbox</h3>
+                <p>
+                  If <strong style={{ color: 'var(--text)' }}>{email}</strong> is registered,
+                  you&apos;ll receive a reset link shortly. The link expires in 1 hour.
+                </p>
+                <p style={{ marginTop: 12 }}>
+                  Didn&apos;t get it? Check your spam folder or{' '}
+                  <button
+                    onClick={() => setSent(false)}
+                    style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 14, fontWeight: 500, padding: 0 }}>
+                    try again
+                  </button>.
+                </p>
               </div>
-              <input
-                type="password" value={password} placeholder="••••••••"
-                onChange={e => setPassword(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              />
-            </div>
+            ) : (
+              <>
+                <div className="auth-card-head">
+                  <h2>Forgot password?</h2>
+                  <p>We&apos;ll email you a secure reset link</p>
+                </div>
 
-            <button className="btn-submit" onClick={handleLogin} disabled={loading}>
-              {loading ? 'Signing in…' : 'Sign In →'}
-            </button>
+                <div className="field">
+                  <label>Email address</label>
+                  <input
+                    type="email" value={email} placeholder="you@example.com"
+                    onChange={e => setEmail(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+                  />
+                </div>
 
-            <hr className="divider" />
+                <button className="btn-submit" onClick={handleSubmit} disabled={loading}>
+                  {loading ? 'Sending…' : 'Send Reset Link →'}
+                </button>
+              </>
+            )}
 
             <p className="auth-footer">
-              No account?{' '}
-              <NextLink href="/register">Create one for free</NextLink>
+              Remembered it?{' '}
+              <NextLink href="/login">Back to Sign In</NextLink>
             </p>
           </div>
         </div>
