@@ -8,7 +8,7 @@ Rwanda's e-commerce space is growing rapidly, but trust between buyers and selle
 [Watch Demo](https://drive.google.com/file/d/1HQQV2yAn8CCIwzAlM1bpKJCzjH9-g3Z1/view?usp=sharing)
 
 ## Live App
- [https://finalcapstone-project-rsyf.vercel.app](https://finalcapstone-project-rsyf.vercel.app)
+ [https://finalcapstone-project-rsyf.vercel.app](https://finalcapstone-project.vercel.app/)
 
 ---
 
