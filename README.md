@@ -9,7 +9,7 @@ Built on the Ethereum Sepolia testnet, SafePay locks buyer funds in a smart cont
 
 ## 🔗 Links
 
-- 🎥 [Demo Video](#) — ([url)(https://drive.google.com/file/d/1HQQV2yAn8CCIwzAlM1bpKJCzjH9-g3Z1/view?usp=sharing))
+- 🎥 [Demo Video](#) — (https://drive.google.com/file/d/1HQQV2yAn8CCIwzAlM1bpKJCzjH9-g3Z1/view?usp=sharing)
 - 🌐 [Live App](https://finalcapstone-project-rsyf.vercel.app)
 - 📁 [GitHub Repo](https://github.com/KelliaMuzira/safepay)
 
