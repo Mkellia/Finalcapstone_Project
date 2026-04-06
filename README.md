@@ -226,8 +226,8 @@ safepay/
 
 **Kellia MUZIRA**
 BSc. Software Engineering — African Leadership University, Kigali, Rwanda
-📧 [k.muzira@alustudent.com](mailto:k.muzira@alustudent.com)
-🐙 [GitHub](https://github.com/KelliaMuzira)
+[k.muzira@alustudent.com](mailto:k.muzira@alustudent.com)
+
 
 ---
 
